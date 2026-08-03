@@ -1,5 +1,7 @@
 import time
 import logging
+import requests
+import os
 from typing import Dict
 
 # Importing the engines we built
@@ -110,7 +112,7 @@ class MasterSignalBot:
                     logger.info(f"🛡️ {coin} Signal Blocked by Duplicate Protection (Score {score}).")
                     continue
 
-                # Broadcast Signal (Mocking Telegram/Streamlit)
+                # Broadcast Signal (Telegram & Console)
                 self.broadcast_signal(coin, signal_type, final_signal, score, triggers)
                 
                 # Update State
@@ -125,14 +127,46 @@ class MasterSignalBot:
 
     def broadcast_signal(self, coin: str, signal_type: str, action: str, score: int, triggers: list):
         """
-        Sends the final structured alert to Telegram & Streamlit UI.
+        Sends the final structured alert to Telegram & logs to console.
         """
+        # 1. Console Log
         logger.info(f"\n🚀 {signal_type} DETECTED! 🚀")
         logger.info(f"Asset: {coin}")
         logger.info(f"Action: {action}")
         logger.info(f"Technical Score: {score}/100")
         logger.info(f"Active Triggers: {', '.join(triggers)}")
         logger.info("-----------------------------------------\n")
+
+        # 2. Telegram Alert System
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+        if bot_token and chat_id:
+            tg_message = (
+                f"🚀 *{signal_type}* 🚀\n\n"
+                f"🪙 *Asset:* #{coin}\n"
+                f"🎯 *Action:* {action}\n"
+                f"📊 *Score:* {score}/100\n"
+                f"⚡ *Triggers:* {', '.join(triggers)}"
+            )
+
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": tg_message,
+                "parse_mode": "Markdown"
+            }
+
+            try:
+                response = requests.post(url, json=payload, timeout=5)
+                if response.status_code == 200:
+                    logger.info("✅ Telegram Alert Sent Successfully!")
+                else:
+                    logger.error(f"❌ Telegram Error: {response.text}")
+            except Exception as e:
+                logger.error(f"🛑 Telegram Delivery Failed: {e}")
+        else:
+            logger.warning("⚠️ Telegram Token or Chat ID is missing in environment variables! Signal not sent to Telegram.")
 
 
 # ==========================================
@@ -141,18 +175,17 @@ class MasterSignalBot:
 if __name__ == "__main__":
     import pandas as pd
     
-    # Initialize the Bot (Replace with real keys)
-    bot = MasterSignalBot(news_api_key="DEMO_NEWS", gemini_api_key="DEMO_GEMINI")
+    # Initialize the Bot with environment variables
+    news_key = os.getenv("NEWS_API_KEY", "DEMO_NEWS")
+    gemini_key = os.getenv("GEMINI_API_KEY", "DEMO_GEMINI")
+    
+    bot = MasterSignalBot(news_api_key=news_key, gemini_api_key=gemini_key)
     
     # Mock Market Data for iteration
     mock_market_data = {
-        "BTC": pd.DataFrame(), # In production, this contains real candle data
+        "BTC": pd.DataFrame(), 
         "ETH": pd.DataFrame()
     }
     
-    # Mock current candle timestamp (e.g., 15m candle close time)
     current_timestamp = int(time.time()) 
-    
-    # Run the cycle
     # bot.run_cycle(mock_market_data, current_timestamp)
-
