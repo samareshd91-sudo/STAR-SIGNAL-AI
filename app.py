@@ -35,6 +35,7 @@ class KuCoinFetcher:
             try:
                 ohlcv = self.exchange.fetch_ohlcv(f"{coin}/USDT", '15m', limit=100)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 data[coin] = df
                 time.sleep(0.3)
             except Exception as e:
@@ -52,9 +53,9 @@ class MasterSignalBot:
 
     def get_tier(self, score: int) -> int:
         if score < 70: return 0
-        elif score < 80: return 1
-        elif score < 90: return 2
-        else: return 3
+        elif score <= 75: return 1  # 70-75: Technical Only
+        elif score < 85: return 2   # 76-84: News Only
+        else: return 3              # 85+: News + Gemini
 
     def should_call_api(self, coin: str, current_ts: str, current_tier: int) -> bool:
         if coin not in self.api_cache: return True
@@ -64,13 +65,13 @@ class MasterSignalBot:
         if cache['candle_ts'] != current_ts: return True
         # Rule 2: 30 minutes passed
         if (time.time() - cache['last_call_time']) >= 1800: return True
-        # Rule 3: Tier Upgraded (e.g., 72 -> 81)
+        # Rule 3: Tier Upgraded
         if current_tier > cache['tier']: return True
         
         return False
 
     def run_cycle(self, live_data: dict):
-        logger.info("⚡ Running Balanced Market Scan...")
+        logger.info("⚡ Running Custom Tiered Market Scan (70-75 Tech | 76-84 News | 85+ Gemini)...")
         tech_results = self.tech_engine.analyze_market(live_data)
 
         for coin, data in tech_results.items():
@@ -83,51 +84,85 @@ class MasterSignalBot:
             tier = self.get_tier(score)
 
             if score < 70:
-                continue # Skip processing to avoid spamming tech signals below threshold
+                continue # Skip processing below 70
 
             # Smart Cache Check
             if not self.should_call_api(coin, candle_ts, tier):
                 continue
 
-            signal_type = "🟡 Technical Signal"
-            trade_action = "BUY" if direction == "BULLISH" else "SELL"
+            signal_type = None
+            trade_action = None
             
             try:
-                # 70-79: News Check
-                if 70 <= score <= 79:
-                    news = self.news_engine.fetch_news_sentiment(coin)
-                    # Technical only (No Gemini)
-                    pass 
+                # ---------------------------------------------------------
+                # SCORE 70-75: Technical Signal Only (No API Calls)
+                # ---------------------------------------------------------
+                if 70 <= score <= 75:
+                    signal_type = "🟡 Technical Signal"
+                    trade_action = "BUY" if direction == "BULLISH" else "SELL"
 
-                # 80-89: News -> Positive -> Gemini
-                elif 80 <= score <= 89:
+                # ---------------------------------------------------------
+                # SCORE 76-84: Trigger News API Only
+                # ---------------------------------------------------------
+                elif 76 <= score < 85:
                     news = self.news_engine.fetch_news_sentiment(coin)
-                    if news["sentiment"] == "BULLISH" and direction == "BULLISH":
-                        ai = self.ai_engine.evaluate_signal(coin, data, news)
-                        if ai.get("action") == "BUY":
-                            signal_type = "🟢 Strong Signal"
-                    elif news["sentiment"] != "NEUTRAL":
-                        signal_type = "🟠 Confirmed by News"
-                        
-                # 90-100: News + Gemini
-                elif score >= 90:
-                    news = self.news_engine.fetch_news_sentiment(coin)
-                    ai = self.ai_engine.evaluate_signal(coin, data, news)
-                    if ai.get("action") in ["BUY", "SELL"]:
-                        signal_type = "🟢 Strong Signal"
-                        trade_action = ai["action"]
+                    news_sentiment = news["sentiment"]
+                    
+                    if news_sentiment == "NEUTRAL" or not news.get("context"):
+                        signal_type = "🟡 Technical Signal"
+                        trade_action = "BUY" if direction == "BULLISH" else "SELL"
                     else:
+                        tech_bullish = (direction == "BULLISH")
+                        news_bullish = (news_sentiment == "BULLISH")
+                        
+                        if tech_bullish != news_bullish and news_sentiment != "MIXED":
+                            logger.info(f"⚠️ {coin}: Technical and News disagree. Skipping trade.")
+                            continue
+                        
                         signal_type = "🟠 Confirmed by News"
+                        trade_action = "BUY" if direction == "BULLISH" else "SELL"
+
+                # ---------------------------------------------------------
+                # SCORE 85-100: Trigger News -> If Positive -> Trigger Gemini
+                # ---------------------------------------------------------
+                elif score >= 85:
+                    news = self.news_engine.fetch_news_sentiment(coin)
+                    news_sentiment = news["sentiment"]
+                    
+                    if news_sentiment == "NEUTRAL" or not news.get("context"):
+                        signal_type = "🟡 Technical Signal"
+                        trade_action = "BUY" if direction == "BULLISH" else "SELL"
+                    else:
+                        tech_bullish = (direction == "BULLISH")
+                        news_bullish = (news_sentiment == "BULLISH")
+                        
+                        if tech_bullish != news_bullish and news_sentiment != "MIXED":
+                            logger.info(f"⚠️ {coin}: Technical and News disagree. Skipping trade.")
+                            continue
+                        
+                        # News is Positive, calling Gemini!
+                        ai_data = self.ai_engine.evaluate_signal(coin, data, news)
+                        ai_action = ai_data.get("action", "WAIT")
+                        ai_status = ai_data.get("status", "SUCCESS") 
+
+                        if ai_status == "ERROR":
+                            signal_type = "🟠 Confirmed by News (AI Fallback)"
+                            trade_action = "BUY" if direction == "BULLISH" else "SELL"
+                        elif ai_action in ["BUY", "SELL"]:
+                            signal_type = "🟢 Strong Signal"
+                            trade_action = ai_action
+                        else:
+                            logger.info(f"🛡️ {coin}: AI returned WAIT. Standing aside.")
+                            continue
 
             except Exception as e:
                 # Backup System: Total API Failure -> Technical Fallback
                 logger.error(f"🛑 API Error on {coin}: {e}. Falling back to Technical.")
-                if score >= 75:
-                    signal_type = "🟡 Technical Signal (Fallback)"
-                else:
-                    continue
+                signal_type = "🟡 Technical Signal (Fallback)"
+                trade_action = "BUY" if direction == "BULLISH" else "SELL"
 
-            self.broadcast(coin, signal_type, trade_action, score, data["trigger_reasons"])
+            if signal_type and trade_action:
+                self.broadcast(coin, signal_type, trade_action, score, data["trigger_reasons"])
             
             # Update Cache
             self.api_cache[coin] = {
