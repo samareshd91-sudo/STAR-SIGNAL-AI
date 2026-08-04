@@ -15,15 +15,139 @@ from ai_engine import GeminiAIEngine
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger("BG_STAR_PRO_SmartAPI")
 
-class DummyHandler(BaseHTTPRequestHandler):
+# ==========================================
+# 🌐 PROFESSIONAL DASHBOARD UI
+# ==========================================
+class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(b"BG STAR PRO Active Scanner is Running!")
+        
+        html_dashboard = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta http-equiv="refresh" content="60"> <!-- Auto refresh every 60s -->
+            <title>BG STAR PRO - Active Dashboard</title>
+            <style>
+                body {
+                    background-color: #0f172a;
+                    color: #e2e8f0;
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                }
+                .dashboard {
+                    background: #1e293b;
+                    padding: 40px;
+                    border-radius: 15px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                    text-align: center;
+                    max-width: 500px;
+                    width: 90%;
+                    border: 1px solid #334155;
+                }
+                h1 { 
+                    color: #38bdf8; 
+                    margin-bottom: 5px; 
+                    font-size: 28px;
+                }
+                p.subtitle {
+                    color: #94a3b8;
+                    margin-bottom: 25px;
+                    font-size: 14px;
+                }
+                .status {
+                    display: inline-block;
+                    padding: 8px 20px;
+                    background: #059669;
+                    color: white;
+                    border-radius: 25px;
+                    font-weight: bold;
+                    font-size: 14px;
+                    margin-bottom: 25px;
+                    animation: pulse 2s infinite;
+                    box-shadow: 0 0 15px rgba(5, 150, 105, 0.4);
+                }
+                .info-grid {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 15px;
+                    text-align: left;
+                }
+                .info-box {
+                    background: #0f172a;
+                    padding: 15px;
+                    border-radius: 10px;
+                    border: 1px solid #334155;
+                    transition: transform 0.2s;
+                }
+                .info-box:hover {
+                    transform: translateY(-2px);
+                    border-color: #38bdf8;
+                }
+                .info-box span { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }
+                .info-box strong { color: #f8fafc; font-size: 16px; }
+                
+                @keyframes pulse {
+                    0% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.7); }
+                    70% { box-shadow: 0 0 0 10px rgba(5, 150, 105, 0); }
+                    100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0); }
+                }
+                .footer {
+                    margin-top: 30px;
+                    font-size: 12px;
+                    color: #64748b;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="dashboard">
+                <h1>🚀 BG STAR PRO</h1>
+                <p class="subtitle">Advanced SMC & AI Algorithmic Trading Bot</p>
+                
+                <div class="status">🟢 SYSTEM ONLINE & SCANNING</div>
+                
+                <div class="info-grid">
+                    <div class="info-box">
+                        <span>⚡ Scan Interval</span>
+                        <strong>30 Seconds</strong>
+                    </div>
+                    <div class="info-box">
+                        <span>🛡️ API Gatekeeper</span>
+                        <strong>Smart Tiered Mode</strong>
+                    </div>
+                    <div class="info-box">
+                        <span>🎯 Target Assets</span>
+                        <strong>BTC, ETH, BNB, SOL, XRP, DOGE</strong>
+                    </div>
+                    <div class="info-box">
+                        <span>🤖 AI Engine</span>
+                        <strong>Gemini Pro Ready</strong>
+                    </div>
+                </div>
+                
+                <div class="footer">
+                    Dashboard auto-refreshes every 60 seconds.<br>
+                    Running securely on Render.
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        self.wfile.write(html_dashboard.encode('utf-8'))
 
-def run_dummy_server():
+def run_dashboard_server():
     port = int(os.environ.get("PORT", 10000))
-    HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
+    HTTPServer(('0.0.0.0', port), DashboardHandler).serve_forever()
+# ==========================================
+
 
 class KuCoinFetcher:
     def __init__(self):
@@ -185,7 +309,9 @@ class MasterSignalBot:
         except: pass
 
 if __name__ == "__main__":
-    threading.Thread(target=run_dummy_server, daemon=True).start()
+    # Start the beautifully designed web dashboard in the background
+    threading.Thread(target=run_dashboard_server, daemon=True).start()
+    
     bot = MasterSignalBot(os.getenv("NEWS_API_KEY", ""), os.getenv("CRYPTOCOMPARE_API_KEY", ""), os.getenv("GEMINI_API_KEY", ""))
     fetcher = KuCoinFetcher()
     target_coins = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"]
