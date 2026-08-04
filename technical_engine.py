@@ -15,18 +15,18 @@ class TechnicalEngine:
         """
         Stage 1 & Stage 2 Execution.
         Iterates through the 6 coins, calculates SMC features, and evaluates the Smart Trigger.
-        market_data format: {"BTC": pd.DataFrame, "ETH": pd.DataFrame, ...}
         """
         scan_results = {}
 
         for coin in self.target_coins:
-            if coin not in market_data or market_data[coin].empty:
-                logger.warning(f"No data for {coin}, skipping.")
+            # We need at least 50 candles to calculate SMA and trends properly
+            if coin not in market_data or market_data[coin].empty or len(market_data[coin]) < 50:
+                logger.warning(f"Not enough data for {coin}, skipping.")
                 continue
 
             df = market_data[coin]
             
-            # 1. Calculate Technical & SMC Features
+            # 1. Calculate Technical & SMC Features using Real OHLCV Data
             features = self._calculate_smc_features(df)
             
             # 2. Evaluate Stage 2 Smart Trigger
@@ -48,13 +48,8 @@ class TechnicalEngine:
 
     def _calculate_smc_features(self, df: pd.DataFrame) -> dict:
         """
-        Detects Price Action and SMC events in the current candle.
-        (Simplified logic for structural representation)
+        Detects Price Action and SMC events in the current candle using real OHLCV Math.
         """
-        # Fetching latest candle data
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
         features = {
             "bos_choch_detected": False,
             "liquidity_sweep": False,
@@ -65,55 +60,68 @@ class TechnicalEngine:
             "trend_direction": "NEUTRAL"
         }
 
-        # Mock Logic for BOS / CHOCH (Requires swing high/low mapping in real implementation)
-        if latest['close'] > prev['high_swing']: 
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        # 1. BOS / CHOCH (Break of Structure): Close above/below the 10-candle highest high / lowest low
+        recent_high = df['high'].iloc[-11:-2].max()
+        recent_low = df['low'].iloc[-11:-2].min()
+        
+        if latest['close'] > recent_high: 
             features["bos_choch_detected"] = True
             features["trend_direction"] = "BULLISH"
+        elif latest['close'] < recent_low:
+            features["bos_choch_detected"] = True
+            features["trend_direction"] = "BEARISH"
 
-        # Mock Logic for Liquidity Sweep
-        if latest['low'] < prev['liquidity_pool'] and latest['close'] > prev['liquidity_pool']:
+        # 2. Liquidity Sweep: Price dips below recent low but closes above it (Long lower wick)
+        if latest['low'] < recent_low and latest['close'] > recent_low:
             features["liquidity_sweep"] = True
+            features["trend_direction"] = "BULLISH"
 
-        # Mock Logic for Order Block + FVG Retest
-        if latest['low'] <= prev['order_block_top'] and latest['close'] > prev['order_block_top']:
+        # 3. OB + FVG Retest Proxy: Price pulls back to the bottom 30% of the recent 15-candle range and bounces
+        range_high = df['high'].iloc[-15:-1].max()
+        range_low = df['low'].iloc[-15:-1].min()
+        discount_zone = range_low + ((range_high - range_low) * 0.3)
+        
+        if latest['low'] <= discount_zone and latest['close'] > discount_zone:
             features["ob_fvg_retest"] = True
 
-        # Mock Logic for Volume Spike (e.g., Volume > 200% of 20 SMA Volume)
-        if latest['volume'] > (df['volume'].rolling(20).mean().iloc[-1] * 2):
+        # 4. Volume Spike: Current volume is 200% higher than the 20-candle average
+        vol_sma20 = df['volume'].rolling(20).mean().iloc[-2]
+        if latest['volume'] > (vol_sma20 * 2):
             features["volume_spike"] = True
 
-        # Mock Logic for ADX Rising (> 25 and rising)
-        if latest['adx'] > 25 and latest['adx'] > prev['adx']:
+        # 5. Momentum Rising (ADX Proxy): Close is higher than 10 EMA and trending up
+        ema10 = df['close'].ewm(span=10, adjust=False).mean().iloc[-1]
+        if latest['close'] > ema10 and latest['close'] > prev['close']:
             features["adx_rising"] = True
 
-        # Mock Logic for HTF Alignment (e.g., H1 and H4 trends match)
-        if latest['h1_trend'] == latest['h4_trend']:
+        # 6. HTF Alignment Proxy: Price is above the 50 SMA (Macro Bullish)
+        sma50 = df['close'].rolling(50).mean().iloc[-1]
+        if latest['close'] > sma50:
             features["htf_alignment"] = True
+
+        # Fallback direction if trigger happens without BOS
+        if features["trend_direction"] == "NEUTRAL" and (features["adx_rising"] or features["htf_alignment"]):
+            features["trend_direction"] = "BULLISH"
 
         return features
 
     def _evaluate_smart_trigger(self, features: dict) -> dict:
         """
         Stage 2: Smart Trigger Engine
-        Checks if at least 2 or 3 strong events happened simultaneously.
+        Checks if at least 2 strong events happened simultaneously.
         """
         active_events = []
         
-        # Checking conditions based on the blueprint
-        if features["bos_choch_detected"]:
-            active_events.append("BOS/CHOCH")
-        if features["liquidity_sweep"]:
-            active_events.append("Liquidity Sweep")
-        if features["ob_fvg_retest"]:
-            active_events.append("OB + FVG Retest")
-        if features["htf_alignment"]:
-            active_events.append("HTF Alignment")
-        if features["adx_rising"]:
-            active_events.append("ADX Rising")
-        if features["volume_spike"]:
-            active_events.append("Volume Spike")
+        if features["bos_choch_detected"]: active_events.append("BOS/CHOCH")
+        if features["liquidity_sweep"]: active_events.append("Liquidity Sweep")
+        if features["ob_fvg_retest"]: active_events.append("OB + FVG Retest")
+        if features["htf_alignment"]: active_events.append("HTF Alignment")
+        if features["adx_rising"]: active_events.append("Momentum Rising")
+        if features["volume_spike"]: active_events.append("Volume Spike")
 
-        # The core logic: Is the market actually making a major move?
         is_triggered = len(active_events) >= self.min_confluence_events
 
         if is_triggered:
@@ -126,20 +134,12 @@ class TechnicalEngine:
 
     def _calculate_base_score(self, features: dict) -> int:
         """
-        Calculates a baseline 0-100 score strictly as a filter/fallback metric,
-        NOT as the primary API trigger.
+        Calculates a baseline score based on technical features.
         """
-        score = 50 # Base score
+        score = 50 
         if features["htf_alignment"]: score += 15
         if features["bos_choch_detected"]: score += 15
         if features["ob_fvg_retest"]: score += 10
         if features["adx_rising"]: score += 5
         if features["volume_spike"]: score += 5
         return min(100, score)
-
-# Usage Example:
-# engine = TechnicalEngine()
-# results = engine.analyze_market(live_dataframe_dict)
-# for coin, data in results.items():
-#     if data["is_triggered"]:
-#         print(f"Move {coin} to Stage 3 (News API)!")
