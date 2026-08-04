@@ -117,7 +117,7 @@ else:
     # Display as an interactive dataframe
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width='stretch',  # ⬅️ ওয়ার্নিংটি ফিক্স করা হয়েছে এখানে
         hide_index=True
     )
     
@@ -138,5 +138,3 @@ else:
                     st.write(f"**AI/System Reason:** {sig['reason']}")
             
             st.divider()
-
-
