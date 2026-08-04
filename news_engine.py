@@ -1,82 +1,78 @@
 import requests
 import logging
-import time
 
-logger = logging.getLogger("BG_STAR_PRO_NewsEngine")
+logger = logging.getLogger("BG_STAR_PRO_News")
 
 class NewsEngine:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        # Example endpoint - will be replaced by your actual news provider
-        self.endpoint = "https://financialmodelingprep.com/api/v3/stock_news" 
-        self.timeout = 5.0  # Strict timeout for crash protection
+    def __init__(self, news_api_key: str, cryptocompare_api_key: str):
+        self.news_api_key = news_api_key
+        self.cryptocompare_key = cryptocompare_api_key
 
     def fetch_news_sentiment(self, coin: str) -> dict:
         """
-        Stage 3 Execution: Fetches recent news and analyzes sentiment.
-        Returns: BULLISH, BEARISH, or NEUTRAL.
+        Fetch news using Dual-API Fallback Strategy.
         """
-        logger.info(f"📰 Smart Trigger received for {coin}. Calling News API...")
+        headlines = []
         
-        fallback_response = {"sentiment": "NEUTRAL", "reason": "No impactful news or API unavailable."}
+        # 1. Primary API: Try CryptoCompare First
+        if self.cryptocompare_key:
+            logger.info(f"🌐 Fetching news for {coin} via CryptoCompare...")
+            headlines = self._fetch_from_cryptocompare(coin)
+            
+        # 2. Secondary API: Fallback to News API if CryptoCompare fails or is empty
+        if not headlines and self.news_api_key:
+            logger.warning(f"⚠️ CryptoCompare failed or empty for {coin}. Switching to News API...")
+            headlines = self._fetch_from_newsapi(coin)
+            
+        # 3. If both fail or no news available
+        if not headlines:
+            logger.info(f"📉 No news found for {coin} from both APIs.")
+            return {"sentiment": "NEUTRAL", "context": "No relevant news found."}
+            
+        # 4. Pre-filter Strategy (Save Gemini API Cost)
+        # We do a quick keyword scan to drop 'Neutral' news before calling Gemini
+        text_context = " | ".join(headlines).lower()
+        
+        bull_words = ['surge', 'jump', 'partner', 'launch', 'bull', 'breakout', 'adopt', 'buy', 'growth']
+        bear_words = ['hack', 'crash', 'ban', 'lawsuit', 'sec', 'bear', 'drop', 'scam', 'sell', 'illegal']
+        
+        bull_count = sum(1 for word in bull_words if word in text_context)
+        bear_count = sum(1 for word in bear_words if word in text_context)
+        
+        if bull_count == 0 and bear_count == 0:
+            sentiment = "NEUTRAL"
+        elif bull_count > bear_count:
+            sentiment = "BULLISH"
+        elif bear_count > bull_count:
+            sentiment = "BEARISH"
+        else:
+            sentiment = "MIXED"
+            
+        return {
+            "sentiment": sentiment,
+            "context": " | ".join(headlines[:5]) # Send top 5 headlines to Gemini
+        }
 
-        # Emergency Fallback System: Protects against API Limit, Timeout, or Internet drop
+    def _fetch_from_cryptocompare(self, coin: str) -> list:
         try:
-            # Assuming 'BTC' needs to be mapped to crypto news search, standardizing query
-            query = f"{coin} crypto"
-            
-            # Simulated API call (replace with actual API parameters)
-            response = requests.get(
-                self.endpoint, 
-                params={"tickers": coin, "limit": 3, "apikey": self.api_key},
-                timeout=self.timeout
-            )
-
-            # Check for Rate Limits (429) or Server Errors (5xx)
-            if response.status_code == 429:
-                logger.warning("⚠️ News API Rate Limit Reached! Switching to Technical Fallback.")
-                return fallback_response
-            elif response.status_code != 200:
-                logger.error(f"⚠️ News API Error {response.status_code}. Switching to Technical Fallback.")
-                return fallback_response
-
-            data = response.json()
-            
-            if not data:
-                return fallback_response
-
-            # Mock Sentiment Logic: In production, API usually provides a sentiment score
-            # Here we simulate evaluating the sentiment from API response
-            bullish_count = 0
-            bearish_count = 0
-            
-            for article in data:
-                sentiment = article.get("sentiment", "Neutral").upper()
-                if sentiment == "BULLISH": bullish_count += 1
-                elif sentiment == "BEARISH": bearish_count += 1
-
-            if bullish_count > bearish_count:
-                return {"sentiment": "BULLISH", "reason": "Positive macro/news catalysts detected."}
-            elif bearish_count > bullish_count:
-                return {"sentiment": "BEARISH", "reason": "Negative macro/news catalysts detected."}
-            else:
-                return {"sentiment": "NEUTRAL", "reason": "News is neutral or mixed. Holding back AI."}
-
-        except requests.exceptions.Timeout:
-            logger.error("🛑 News API Timeout. Switching to Technical Fallback.")
-            return fallback_response
-        except requests.exceptions.ConnectionError:
-            logger.error("🛑 Internet Connection Error. Switching to Technical Fallback.")
-            return fallback_response
+            url = f"https://min-api.cryptocompare.com/data/v2/news/?categories={coin}&api_key={self.cryptocompare_key}"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                # Return top 5 news titles
+                return [item['title'] for item in data.get('Data', [])[:5]]
         except Exception as e:
-            logger.error(f"🛑 Unexpected News API Error: {e}. Switching to Technical Fallback.")
-            return fallback_response
+            logger.error(f"CryptoCompare API Error: {e}")
+        return []
 
-# Usage in Main App Loop:
-# if tech_data["is_triggered"]:
-#     news_data = news_engine.fetch_news_sentiment(tech_data["coin"])
-#     if news_data["sentiment"] in ["BULLISH", "BEARISH"]:
-#         # Proceed to Gemini
-#     else:
-#         # Send Technical Signal, STOP API funnel here
-
+    def _fetch_from_newsapi(self, coin: str) -> list:
+        try:
+            url = f"https://newsapi.org/v2/everything?q={coin} crypto&language=en&sortBy=publishedAt&apiKey={self.news_api_key}"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                # Return top 5 news titles
+                return [item['title'] for item in data.get('articles', [])[:5]]
+        except Exception as e:
+            logger.error(f"NewsAPI Error: {e}")
+        return []
