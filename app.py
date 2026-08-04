@@ -2,7 +2,7 @@ import time
 import logging
 import requests
 import os
-import ccxt  # ⬅️ নতুন যুক্ত করা হয়েছে লাইভ ডেটার জন্য
+import ccxt
 import pandas as pd
 from typing import Dict
 
@@ -16,7 +16,7 @@ logger = logging.getLogger("BG_STAR_PRO_Master")
 
 
 # ==========================================
-# 📡 LIVE DATA FETCHER (KUCOIN) - নতুন অংশ
+# 📡 LIVE DATA FETCHER (KUCOIN)
 # ==========================================
 class KuCoinFetcher:
     def __init__(self):
@@ -40,12 +40,13 @@ class KuCoinFetcher:
 
 
 # ==========================================
-# 🧠 MASTER SIGNAL BOT (আপনার আগের কোড)
+# 🧠 MASTER SIGNAL BOT
 # ==========================================
 class MasterSignalBot:
-    def __init__(self, news_api_key: str, gemini_api_key: str):
+    def __init__(self, news_api_key: str, cryptocompare_api_key: str, gemini_api_key: str):
         self.tech_engine = TechnicalEngine()
-        self.news_engine = NewsEngine(news_api_key)
+        # দুটি News API Key একসাথে পাঠানো হচ্ছে NewsEngine-এ
+        self.news_engine = NewsEngine(news_api_key, cryptocompare_api_key)
         self.ai_engine = GeminiAIEngine(gemini_api_key)
         
         # State Management for Cooldown and Duplicate Protection
@@ -108,7 +109,7 @@ class MasterSignalBot:
                     continue 
             else:
                 # ----------------------------------------------------
-                # STAGE 3: NEWS API TRIGGER
+                # STAGE 3: NEWS API TRIGGER (Dual API Enabled)
                 # ----------------------------------------------------
                 news_data = self.news_engine.fetch_news_sentiment(coin)
                 
@@ -194,12 +195,17 @@ class MasterSignalBot:
 # 🚀 MAIN EXECUTION LOOP (রিয়েল-টাইম রানার)
 # ==========================================
 if __name__ == "__main__":
-    # API Keys Load
-    news_key = os.getenv("NEWS_API_KEY", "DEMO_NEWS")
-    gemini_key = os.getenv("GEMINI_API_KEY", "DEMO_GEMINI")
+    # API Keys Load (Now includes CryptoCompare)
+    news_key = os.getenv("NEWS_API_KEY", "")
+    cryptocompare_key = os.getenv("CRYPTOCOMPARE_API_KEY", "")
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
     
-    # Initialize the Engines
-    bot = MasterSignalBot(news_api_key=news_key, gemini_api_key=gemini_key)
+    # Initialize the Engines with all 3 keys
+    bot = MasterSignalBot(
+        news_api_key=news_key, 
+        cryptocompare_api_key=cryptocompare_key, 
+        gemini_api_key=gemini_key
+    )
     fetcher = KuCoinFetcher()
     
     # আপনার পছন্দের ৬টি কয়েন
