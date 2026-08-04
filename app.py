@@ -2,6 +2,8 @@ import time
 import logging
 import requests
 import os
+import ccxt  # ⬅️ নতুন যুক্ত করা হয়েছে লাইভ ডেটার জন্য
+import pandas as pd
 from typing import Dict
 
 # Importing the engines we built
@@ -12,6 +14,34 @@ from ai_engine import GeminiAIEngine
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger("BG_STAR_PRO_Master")
 
+
+# ==========================================
+# 📡 LIVE DATA FETCHER (KUCOIN) - নতুন অংশ
+# ==========================================
+class KuCoinFetcher:
+    def __init__(self):
+        # KuCoin API initialization (No API Key needed for basic market data)
+        self.exchange = ccxt.kucoin({'enableRateLimit': True})
+        
+    def fetch_live_data(self, coins: list, timeframe: str = '15m', limit: int = 100) -> dict:
+        market_data = {}
+        for coin in coins:
+            symbol = f"{coin}/USDT"
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                market_data[coin] = df
+                logger.info(f"✅ Downloaded {len(df)} live candles for {symbol}")
+                time.sleep(0.5) # Rate limit safety
+            except Exception as e:
+                logger.error(f"🛑 Error fetching data for {symbol}: {e}")
+        return market_data
+
+
+# ==========================================
+# 🧠 MASTER SIGNAL BOT (আপনার আগের কোড)
+# ==========================================
 class MasterSignalBot:
     def __init__(self, news_api_key: str, gemini_api_key: str):
         self.tech_engine = TechnicalEngine()
@@ -44,7 +74,7 @@ class MasterSignalBot:
     def run_cycle(self, live_market_data: dict, current_candle_timestamp: int):
         """
         Main Event Loop. Runs every minute or candle close.
-        live_market_data: dict of DataFrames for the 6 coins.
+        live_market_data: dict of DataFrames for the target coins.
         """
         logger.info("=========================================")
         logger.info("🔍 STAGE 1: Running Technical Scan...")
@@ -71,12 +101,11 @@ class MasterSignalBot:
             # STAGE 2: SMART TRIGGER EVALUATION
             # ----------------------------------------------------
             if not is_triggered:
-                # No trigger? No API. Check if it's a valid backup Technical Signal
                 if score >= 75:
                     signal_type = "🟡 Technical Signal"
                     final_signal = direction
                 else:
-                    continue # Ignore completely (Score < 75, No Trigger)
+                    continue 
             else:
                 # ----------------------------------------------------
                 # STAGE 3: NEWS API TRIGGER
@@ -84,30 +113,25 @@ class MasterSignalBot:
                 news_data = self.news_engine.fetch_news_sentiment(coin)
                 
                 if news_data["sentiment"] == "NEUTRAL":
-                    # News Neutral -> Stop API Funnel -> Send Technical Signal
                     signal_type = "🟡 Technical Signal"
                     final_signal = direction
                 else:
-                    # News is Bullish or Bearish -> Moving to Gemini
                     # ----------------------------------------------------
                     # STAGE 4: GEMINI AI CONFIRMATION
                     # ----------------------------------------------------
                     ai_data = self.ai_engine.evaluate_signal(coin, tech_data, news_data)
                     
                     if ai_data["action"] == "WAIT":
-                        # AI failed or says wait -> Downgrade to News Confirmed
                         signal_type = "🟠 Confirmed by News"
-                        final_signal = news_data["sentiment"] # Bullish/Bearish
+                        final_signal = news_data["sentiment"] 
                     else:
-                        # ALL ALIGNED! Technical + News + AI
                         signal_type = "🟢 Strong Signal"
-                        final_signal = ai_data["action"] # BUY/SELL
+                        final_signal = ai_data["action"] 
 
             # ----------------------------------------------------
             # STAGE 5: DUPLICATE PROTECTION & BROADCAST
             # ----------------------------------------------------
             if final_signal:
-                # Check Duplicate Logic
                 if self.is_duplicate_signal(coin, score, final_signal, triggers):
                     logger.info(f"🛡️ {coin} Signal Blocked by Duplicate Protection (Score {score}).")
                     continue
@@ -115,14 +139,11 @@ class MasterSignalBot:
                 # Broadcast Signal (Telegram & Console)
                 self.broadcast_signal(coin, signal_type, final_signal, score, triggers)
                 
-                # Update State
                 self.signal_history[coin] = {
                     "direction": final_signal,
                     "score": score,
                     "triggers": triggers
                 }
-                
-                # Apply Candle Cooldown (Rule 5: After sending, skip candle)
                 self.last_candle_time[coin] = current_candle_timestamp
 
     def broadcast_signal(self, coin: str, signal_type: str, action: str, score: int, triggers: list):
@@ -166,26 +187,40 @@ class MasterSignalBot:
             except Exception as e:
                 logger.error(f"🛑 Telegram Delivery Failed: {e}")
         else:
-            logger.warning("⚠️ Telegram Token or Chat ID is missing in environment variables! Signal not sent to Telegram.")
+            logger.warning("⚠️ Telegram Token or Chat ID is missing! Signal not sent to Telegram.")
 
 
 # ==========================================
-# USAGE EXAMPLE (MOCK)
+# 🚀 MAIN EXECUTION LOOP (রিয়েল-টাইম রানার)
 # ==========================================
 if __name__ == "__main__":
-    import pandas as pd
-    
-    # Initialize the Bot with environment variables
+    # API Keys Load
     news_key = os.getenv("NEWS_API_KEY", "DEMO_NEWS")
     gemini_key = os.getenv("GEMINI_API_KEY", "DEMO_GEMINI")
     
+    # Initialize the Engines
     bot = MasterSignalBot(news_api_key=news_key, gemini_api_key=gemini_key)
+    fetcher = KuCoinFetcher()
     
-    # Mock Market Data for iteration
-    mock_market_data = {
-        "BTC": pd.DataFrame(), 
-        "ETH": pd.DataFrame()
-    }
+    # আপনার পছন্দের ৬টি কয়েন
+    target_coins = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"]
     
-    current_timestamp = int(time.time()) 
-    # bot.run_cycle(mock_market_data, current_timestamp)
+    logger.info("🔥 BG STAR PRO Backend Started. Waiting for live market data...")
+    
+    # ইনফিনিট লুপ (বট ২৪ ঘণ্টা চলতে থাকবে)
+    while True:
+        try:
+            # ১. KuCoin থেকে আসল ক্যান্ডেল ডেটা আনা
+            live_data = fetcher.fetch_live_data(target_coins, timeframe='15m')
+            
+            # ২. ডেটাগুলো মাস্টার বটের কাছে পাঠানো স্ক্যানিংয়ের জন্য
+            current_timestamp = int(time.time()) 
+            bot.run_cycle(live_data, current_timestamp)
+            
+            # ৩. স্ক্যান শেষে ৫ মিনিট অপেক্ষা করা (যাতে API ব্যান না হয়)
+            logger.info("⏳ Cycle complete. Waiting 5 minutes for the next market scan...\n")
+            time.sleep(300) 
+            
+        except Exception as e:
+            logger.error(f"🛑 Critical System Error in Main Loop: {e}")
+            time.sleep(60) # কোনো ইন্টারনেট সমস্যা হলে ১ মিনিট পর আবার চেষ্টা করবে
