@@ -3,3 +3,4 @@ requests
 google-generativeai
 streamlit
 python-dotenv
+ccxt
