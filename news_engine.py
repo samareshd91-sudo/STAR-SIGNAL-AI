@@ -1,66 +1,83 @@
-import requests
+import feedparser
 import logging
+import re
 
-logger = logging.getLogger("BG_STAR_PRO_News")
+logger = logging.getLogger("BG_STAR_PRO_NewsEngine")
 
 class NewsEngine:
-    def __init__(self, news_api_key: str, cryptocompare_api_key: str):
-        self.news_api_key = news_api_key
-        self.cryptocompare_key = cryptocompare_api_key
+    def __init__(self, news_api_key=None, cryptocompare_api_key=None):
+        # API Keys আর দরকার নেই, কিন্তু app.py যাতে ক্র্যাশ না করে তাই এগুলো রাখা হলো
+        self.rss_feeds = [
+            "https://cointelegraph.com/rss",
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://cryptoslate.com/feed/"
+        ]
+        
+        # কয়েনের নামের ম্যাপিং যাতে খবর সহজে খুঁজে পায়
+        self.coin_map = {
+            "BTC": ["BTC", "Bitcoin"],
+            "ETH": ["ETH", "Ethereum"],
+            "BNB": ["BNB", "Binance"],
+            "SOL": ["SOL", "Solana"],
+            "XRP": ["XRP", "Ripple"],
+            "DOGE": ["DOGE", "Dogecoin"]
+        }
+        
+        # সেন্টিমেন্ট অ্যানালিসিস কিওয়ার্ডস
+        self.bullish_words = ['surge', 'jump', 'high', 'adopt', 'partner', 'launch', 'upgrade', 'buy', 'bull', 'positive', 'growth', 'gain', 'soar', 'record', 'approve', 'breakout']
+        self.bearish_words = ['crash', 'drop', 'fall', 'hack', 'scam', 'ban', 'illegal', 'sell', 'bear', 'negative', 'lawsuit', 'plunge', 'delay', 'reject', 'investigation', 'dump']
 
     def fetch_news_sentiment(self, coin: str) -> dict:
-        headlines = []
-        
-        # 1. Try CryptoCompare First
-        if self.cryptocompare_key:
-            headlines = self._fetch_from_cryptocompare(coin)
-            
-        # 2. Fallback to News API
-        if not headlines and self.news_api_key:
-            headlines = self._fetch_from_newsapi(coin)
-            
-        if not headlines:
-            return {"sentiment": "NEUTRAL", "context": "No relevant news found."}
-            
-        text_context = " | ".join(headlines).lower()
-        
-        bull_words = ['surge', 'jump', 'partner', 'launch', 'bull', 'breakout', 'adopt', 'buy', 'growth']
-        bear_words = ['hack', 'crash', 'ban', 'lawsuit', 'sec', 'bear', 'drop', 'scam', 'sell', 'illegal']
-        
-        bull_count = sum(1 for word in bull_words if word in text_context)
-        bear_count = sum(1 for word in bear_words if word in text_context)
-        
-        if bull_count > bear_count: sentiment = "BULLISH"
-        elif bear_count > bull_count: sentiment = "BEARISH"
-        else: sentiment = "NEUTRAL"
-            
-        return {
-            "sentiment": sentiment,
-            "context": text_context[:200]
-        }
-
-    def _fetch_from_cryptocompare(self, coin: str) -> list:
         try:
-            url = f"https://min-api.cryptocompare.com/data/v2/news/?categories={coin}&api_key={self.cryptocompare_key}"
-            res = requests.get(url, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                raw_data = data.get('Data', [])
-                if isinstance(raw_data, list):
-                    return [item.get('title', '') for item in raw_data[:5] if isinstance(item, dict)]
+            logger.info(f"📰 Fetching Live RSS news for {coin}...")
+            search_terms = self.coin_map.get(coin, [coin])
+            
+            relevant_news = []
+            bullish_score = 0
+            bearish_score = 0
+            
+            # সবগুলো RSS ফিড থেকে লেটেস্ট খবর আনা
+            for feed_url in self.rss_feeds:
+                feed = feedparser.parse(feed_url)
+                
+                # প্রতিটি সাইটের লেটেস্ট ১৫টি খবর চেক করা
+                for entry in feed.entries[:15]: 
+                    title = entry.get('title', '')
+                    summary = entry.get('summary', '')
+                    text_to_check = (title + " " + summary).lower()
+                    
+                    # খবরটিতে আমাদের কাঙ্ক্ষিত কয়েনের নাম আছে কিনা চেক করা
+                    is_relevant = any(re.search(rf'\b{term.lower()}\b', text_to_check) for term in search_terms)
+                    
+                    if is_relevant:
+                        relevant_news.append(title)
+                        
+                        # বুলিশ এবং বেয়ারিশ কিওয়ার্ড ম্যাচিং করে পয়েন্ট দেওয়া
+                        for word in self.bullish_words:
+                            if re.search(rf'\b{word}\b', text_to_check): bullish_score += 1
+                        for word in self.bearish_words:
+                            if re.search(rf'\b{word}\b', text_to_check): bearish_score += 1
+                            
+            if not relevant_news:
+                logger.info(f"📰 No recent news found for {coin}. Returning NEUTRAL.")
+                return {"sentiment": "NEUTRAL", "context": ""}
+                
+            # ফাইনাল সেন্টিমেন্ট নির্ধারণ করা
+            if bullish_score > bearish_score + 1:
+                sentiment = "BULLISH"
+            elif bearish_score > bullish_score + 1:
+                sentiment = "BEARISH"
+            elif bullish_score > 0 or bearish_score > 0:
+                sentiment = "MIXED"
+            else:
+                sentiment = "NEUTRAL"
+                
+            # জেমিনি এআই-এর জন্য লেটেস্ট ৩টি খবরের শিরোনাম একসাথে জুড়ে দেওয়া
+            context = " | ".join(relevant_news[:3]) 
+            
+            logger.info(f"📰 RSS Sentiment for {coin}: {sentiment} (Bull: {bullish_score}, Bear: {bearish_score})")
+            return {"sentiment": sentiment, "context": context}
+            
         except Exception as e:
-            logger.error(f"CryptoCompare API Error: {e}")
-        return []
-
-    def _fetch_from_newsapi(self, coin: str) -> list:
-        try:
-            url = f"https://newsapi.org/v2/everything?q={coin} crypto&language=en&sortBy=publishedAt&apiKey={self.news_api_key}"
-            res = requests.get(url, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                articles = data.get('articles', [])
-                if isinstance(articles, list):
-                    return [item.get('title', '') for item in articles[:5] if isinstance(item, dict)]
-        except Exception as e:
-            logger.error(f"NewsAPI Error: {e}")
-        return []
+            logger.error(f"🛑 RSS Feed Error for {coin}: {e}")
+            return {"sentiment": "NEUTRAL", "context": ""}
