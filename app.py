@@ -5,8 +5,12 @@ import os
 import ccxt
 import pandas as pd
 import threading
+import warnings
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict
+
+# জেমিনির ওয়ার্নিং মেসেজ বন্ধ করার জন্য
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from technical_engine import TechnicalEngine
 from news_engine import NewsEngine
@@ -19,6 +23,9 @@ logger = logging.getLogger("BG_STAR_PRO_SmartAPI")
 # 🌐 PROFESSIONAL DASHBOARD UI
 # ==========================================
 class DashboardHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return 
+
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
@@ -95,10 +102,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <p class="subtitle">Advanced SMC & AI Algorithmic Trading Bot</p>
                 <div class="status">🟢 SYSTEM ONLINE & SCANNING</div>
                 <div class="info-grid">
-                    <div class="info-box"><span>⚡ Scan Interval</span><strong>30 Seconds</strong></div>
+                    <div class="info-box"><span>⚡ Scan Interval</span><strong>15 Seconds</strong></div>
                     <div class="info-box"><span>📰 News Engine</span><strong>Live RSS (Free)</strong></div>
                     <div class="info-box"><span>🎯 Target Assets</span><strong>BTC, ETH, BNB, SOL, XRP, DOGE</strong></div>
-                    <div class="info-box"><span>🤖 AI Engine</span><strong>Gemini Pro (Smart Call)</strong></div>
+                    <div class="info-box"><span>🤖 AI Engine</span><strong>Gemini Pro (Score 76+)</strong></div>
                 </div>
                 <div class="footer">Dashboard auto-refreshes every 60 seconds.<br>Running securely on Render.</div>
             </div>
@@ -134,12 +141,10 @@ class MasterSignalBot:
         self.tech_engine = TechnicalEngine()
         self.news_engine = NewsEngine(news_key, crypto_key)
         self.ai_engine = GeminiAIEngine(gemini_key)
-        
-        # Simple Cache System to prevent spamming
         self.api_cache = {}
 
     def run_cycle(self, live_data: dict):
-        logger.info("⚡ Running Unified Market Scan (Score 70+ -> Free News -> Smart Gemini)...")
+        logger.info("⚡ Running Ultimate Gatekeeper Scan (Free News -> Gemini on 76+)...")
         tech_results = self.tech_engine.analyze_market(live_data)
 
         for coin, data in tech_results.items():
@@ -153,7 +158,7 @@ class MasterSignalBot:
             if score < 70:
                 continue 
 
-            # 🛡️ Cache Check: Prevent sending the same signal repeatedly in the same 15m candle
+            # Cache Check
             if coin in self.api_cache:
                 cache = self.api_cache[coin]
                 if cache['candle_ts'] == candle_ts and (time.time() - cache['last_call_time']) < 1800:
@@ -163,54 +168,52 @@ class MasterSignalBot:
             trade_action = None
             
             try:
-                # ---------------------------------------------------------
-                # 1. ALWAYS Call News (Since RSS is 100% Free & Unlimited)
-                # ---------------------------------------------------------
+                # 1. ALWAYS Call Free RSS News
                 news = self.news_engine.fetch_news_sentiment(coin)
                 news_sentiment = news["sentiment"]
                 
                 tech_bullish = (direction == "BULLISH")
-                news_bullish = (news_sentiment == "BULLISH")
-                tech_bearish = (direction == "BEARISH")
                 news_bearish = (news_sentiment == "BEARISH")
+                tech_bearish = (direction == "BEARISH")
+                news_bullish = (news_sentiment == "BULLISH")
                 
                 if news_sentiment == "NEUTRAL" or not news.get("context"):
-                    # No active news -> Just send Technical Signal
                     signal_type = "🟡 Technical Signal"
                     trade_action = "BUY" if tech_bullish else "SELL"
                 else:
-                    # ---------------------------------------------------------
-                    # 2. Check Alignment & Call Gemini
-                    # ---------------------------------------------------------
+                    # News Disagrees -> Skip
                     if (tech_bullish and news_bearish) or (tech_bearish and news_bullish):
                         logger.info(f"⚠️ {coin}: Technical ({direction}) and News ({news_sentiment}) disagree. Skipping trade.")
                         continue
                     
-                    # News matches Technical! Now call Gemini to confirm
-                    logger.info(f"🔥 {coin}: News aligns with Technical! Calling Gemini AI...")
-                    ai_data = self.ai_engine.evaluate_signal(coin, data, news)
-                    ai_action = ai_data.get("action", "WAIT")
-                    ai_status = ai_data.get("status", "SUCCESS") 
+                    # News Matches Technical!
+                    if score > 75: 
+                        # Call Gemini if Score is Above 75
+                        logger.info(f"🔥 {coin}: Score is {score}. Calling Gemini AI...")
+                        ai_data = self.ai_engine.evaluate_signal(coin, data, news)
+                        ai_action = ai_data.get("action", "WAIT")
+                        ai_status = ai_data.get("status", "SUCCESS") 
 
-                    if ai_status == "ERROR":
-                        signal_type = "🟠 Confirmed by News (AI Fallback)"
-                        trade_action = "BUY" if tech_bullish else "SELL"
-                    elif ai_action in ["BUY", "SELL"]:
-                        signal_type = "🟢 Strong Signal"
-                        trade_action = ai_action
+                        if ai_status == "ERROR":
+                            signal_type = "🟠 Confirmed by News (AI Fallback)"
+                            trade_action = "BUY" if tech_bullish else "SELL"
+                        elif ai_action in ["BUY", "SELL"]:
+                            signal_type = "🟢 Strong Signal"
+                            trade_action = ai_action
+                        else:
+                            continue
                     else:
-                        logger.info(f"🛡️ {coin}: AI returned WAIT. Standing aside.")
-                        continue
+                        # Score is 70-75 (Confirmed by News, No Gemini)
+                        signal_type = "🟠 Confirmed by News"
+                        trade_action = "BUY" if tech_bullish else "SELL"
 
             except Exception as e:
-                # Backup System
                 logger.error(f"🛑 API Error on {coin}: {e}. Falling back to Technical.")
                 signal_type = "🟡 Technical Signal (Fallback)"
                 trade_action = "BUY" if direction == "BULLISH" else "SELL"
 
             if signal_type and trade_action:
                 self.broadcast(coin, signal_type, trade_action, score, data["trigger_reasons"])
-                # Save to cache so it doesn't spam
                 self.api_cache[coin] = {
                     "candle_ts": candle_ts,
                     "last_call_time": time.time()
@@ -238,6 +241,7 @@ if __name__ == "__main__":
     while True:
         try:
             bot.run_cycle(fetcher.fetch_live_data(target_coins))
-            time.sleep(30) 
+            # Scan time updated to 15 seconds
+            time.sleep(15) 
         except:
-            time.sleep(30)
+            time.sleep(15)
