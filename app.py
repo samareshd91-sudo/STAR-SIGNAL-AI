@@ -30,7 +30,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="refresh" content="60"> <!-- Auto refresh every 60s -->
+            <meta http-equiv="refresh" content="60">
             <title>BG STAR PRO - Active Dashboard</title>
             <style>
                 body {
@@ -53,16 +53,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     width: 90%;
                     border: 1px solid #334155;
                 }
-                h1 { 
-                    color: #38bdf8; 
-                    margin-bottom: 5px; 
-                    font-size: 28px;
-                }
-                p.subtitle {
-                    color: #94a3b8;
-                    margin-bottom: 25px;
-                    font-size: 14px;
-                }
+                h1 { color: #38bdf8; margin-bottom: 5px; font-size: 28px; }
+                p.subtitle { color: #94a3b8; margin-bottom: 25px; font-size: 14px; }
                 .status {
                     display: inline-block;
                     padding: 8px 20px;
@@ -86,57 +78,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     padding: 15px;
                     border-radius: 10px;
                     border: 1px solid #334155;
-                    transition: transform 0.2s;
-                }
-                .info-box:hover {
-                    transform: translateY(-2px);
-                    border-color: #38bdf8;
                 }
                 .info-box span { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }
                 .info-box strong { color: #f8fafc; font-size: 16px; }
-                
                 @keyframes pulse {
                     0% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.7); }
                     70% { box-shadow: 0 0 0 10px rgba(5, 150, 105, 0); }
                     100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0); }
                 }
-                .footer {
-                    margin-top: 30px;
-                    font-size: 12px;
-                    color: #64748b;
-                }
+                .footer { margin-top: 30px; font-size: 12px; color: #64748b; }
             </style>
         </head>
         <body>
             <div class="dashboard">
                 <h1>🚀 BG STAR PRO</h1>
                 <p class="subtitle">Advanced SMC & AI Algorithmic Trading Bot</p>
-                
                 <div class="status">🟢 SYSTEM ONLINE & SCANNING</div>
-                
                 <div class="info-grid">
-                    <div class="info-box">
-                        <span>⚡ Scan Interval</span>
-                        <strong>30 Seconds</strong>
-                    </div>
-                    <div class="info-box">
-                        <span>🛡️ API Gatekeeper</span>
-                        <strong>Smart Tiered Mode</strong>
-                    </div>
-                    <div class="info-box">
-                        <span>🎯 Target Assets</span>
-                        <strong>BTC, ETH, BNB, SOL, XRP, DOGE</strong>
-                    </div>
-                    <div class="info-box">
-                        <span>🤖 AI Engine</span>
-                        <strong>Gemini Pro Ready</strong>
-                    </div>
+                    <div class="info-box"><span>⚡ Scan Interval</span><strong>30 Seconds</strong></div>
+                    <div class="info-box"><span>📰 News Engine</span><strong>Live RSS (Free)</strong></div>
+                    <div class="info-box"><span>🎯 Target Assets</span><strong>BTC, ETH, BNB, SOL, XRP, DOGE</strong></div>
+                    <div class="info-box"><span>🤖 AI Engine</span><strong>Gemini Pro (Smart Call)</strong></div>
                 </div>
-                
-                <div class="footer">
-                    Dashboard auto-refreshes every 60 seconds.<br>
-                    Running securely on Render.
-                </div>
+                <div class="footer">Dashboard auto-refreshes every 60 seconds.<br>Running securely on Render.</div>
             </div>
         </body>
         </html>
@@ -147,7 +111,6 @@ def run_dashboard_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(('0.0.0.0', port), DashboardHandler).serve_forever()
 # ==========================================
-
 
 class KuCoinFetcher:
     def __init__(self):
@@ -172,30 +135,11 @@ class MasterSignalBot:
         self.news_engine = NewsEngine(news_key, crypto_key)
         self.ai_engine = GeminiAIEngine(gemini_key)
         
-        # Smart Cache System
+        # Simple Cache System to prevent spamming
         self.api_cache = {}
 
-    def get_tier(self, score: int) -> int:
-        if score < 70: return 0
-        elif score <= 75: return 1  # 70-75: Technical Only
-        elif score < 85: return 2   # 76-84: News Only
-        else: return 3              # 85+: News + Gemini
-
-    def should_call_api(self, coin: str, current_ts: str, current_tier: int) -> bool:
-        if coin not in self.api_cache: return True
-        
-        cache = self.api_cache[coin]
-        # Rule 1: New Candle
-        if cache['candle_ts'] != current_ts: return True
-        # Rule 2: 30 minutes passed
-        if (time.time() - cache['last_call_time']) >= 1800: return True
-        # Rule 3: Tier Upgraded
-        if current_tier > cache['tier']: return True
-        
-        return False
-
     def run_cycle(self, live_data: dict):
-        logger.info("⚡ Running Custom Tiered Market Scan (70-75 Tech | 76-84 News | 85+ Gemini)...")
+        logger.info("⚡ Running Unified Market Scan (Score 70+ -> Free News -> Smart Gemini)...")
         tech_results = self.tech_engine.analyze_market(live_data)
 
         for coin, data in tech_results.items():
@@ -205,95 +149,72 @@ class MasterSignalBot:
             score = data["technical_score"]
             direction = data["direction"]
             candle_ts = str(df.iloc[-1]['timestamp'])
-            tier = self.get_tier(score)
 
             if score < 70:
-                continue # Skip processing below 70
+                continue 
 
-            # Smart Cache Check
-            if not self.should_call_api(coin, candle_ts, tier):
-                continue
+            # 🛡️ Cache Check: Prevent sending the same signal repeatedly in the same 15m candle
+            if coin in self.api_cache:
+                cache = self.api_cache[coin]
+                if cache['candle_ts'] == candle_ts and (time.time() - cache['last_call_time']) < 1800:
+                    continue
 
             signal_type = None
             trade_action = None
             
             try:
                 # ---------------------------------------------------------
-                # SCORE 70-75: Technical Signal Only (No API Calls)
+                # 1. ALWAYS Call News (Since RSS is 100% Free & Unlimited)
                 # ---------------------------------------------------------
-                if 70 <= score <= 75:
+                news = self.news_engine.fetch_news_sentiment(coin)
+                news_sentiment = news["sentiment"]
+                
+                tech_bullish = (direction == "BULLISH")
+                news_bullish = (news_sentiment == "BULLISH")
+                tech_bearish = (direction == "BEARISH")
+                news_bearish = (news_sentiment == "BEARISH")
+                
+                if news_sentiment == "NEUTRAL" or not news.get("context"):
+                    # No active news -> Just send Technical Signal
                     signal_type = "🟡 Technical Signal"
-                    trade_action = "BUY" if direction == "BULLISH" else "SELL"
-
-                # ---------------------------------------------------------
-                # SCORE 76-84: Trigger News API Only
-                # ---------------------------------------------------------
-                elif 76 <= score < 85:
-                    news = self.news_engine.fetch_news_sentiment(coin)
-                    news_sentiment = news["sentiment"]
+                    trade_action = "BUY" if tech_bullish else "SELL"
+                else:
+                    # ---------------------------------------------------------
+                    # 2. Check Alignment & Call Gemini
+                    # ---------------------------------------------------------
+                    if (tech_bullish and news_bearish) or (tech_bearish and news_bullish):
+                        logger.info(f"⚠️ {coin}: Technical ({direction}) and News ({news_sentiment}) disagree. Skipping trade.")
+                        continue
                     
-                    if news_sentiment == "NEUTRAL" or not news.get("context"):
-                        signal_type = "🟡 Technical Signal"
-                        trade_action = "BUY" if direction == "BULLISH" else "SELL"
-                    else:
-                        tech_bullish = (direction == "BULLISH")
-                        news_bullish = (news_sentiment == "BULLISH")
-                        
-                        if tech_bullish != news_bullish and news_sentiment != "MIXED":
-                            logger.info(f"⚠️ {coin}: Technical and News disagree. Skipping trade.")
-                            continue
-                        
-                        signal_type = "🟠 Confirmed by News"
-                        trade_action = "BUY" if direction == "BULLISH" else "SELL"
+                    # News matches Technical! Now call Gemini to confirm
+                    logger.info(f"🔥 {coin}: News aligns with Technical! Calling Gemini AI...")
+                    ai_data = self.ai_engine.evaluate_signal(coin, data, news)
+                    ai_action = ai_data.get("action", "WAIT")
+                    ai_status = ai_data.get("status", "SUCCESS") 
 
-                # ---------------------------------------------------------
-                # SCORE 85-100: Trigger News -> If Positive -> Trigger Gemini
-                # ---------------------------------------------------------
-                elif score >= 85:
-                    news = self.news_engine.fetch_news_sentiment(coin)
-                    news_sentiment = news["sentiment"]
-                    
-                    if news_sentiment == "NEUTRAL" or not news.get("context"):
-                        signal_type = "🟡 Technical Signal"
-                        trade_action = "BUY" if direction == "BULLISH" else "SELL"
+                    if ai_status == "ERROR":
+                        signal_type = "🟠 Confirmed by News (AI Fallback)"
+                        trade_action = "BUY" if tech_bullish else "SELL"
+                    elif ai_action in ["BUY", "SELL"]:
+                        signal_type = "🟢 Strong Signal"
+                        trade_action = ai_action
                     else:
-                        tech_bullish = (direction == "BULLISH")
-                        news_bullish = (news_sentiment == "BULLISH")
-                        
-                        if tech_bullish != news_bullish and news_sentiment != "MIXED":
-                            logger.info(f"⚠️ {coin}: Technical and News disagree. Skipping trade.")
-                            continue
-                        
-                        # News is Positive, calling Gemini!
-                        ai_data = self.ai_engine.evaluate_signal(coin, data, news)
-                        ai_action = ai_data.get("action", "WAIT")
-                        ai_status = ai_data.get("status", "SUCCESS") 
-
-                        if ai_status == "ERROR":
-                            signal_type = "🟠 Confirmed by News (AI Fallback)"
-                            trade_action = "BUY" if direction == "BULLISH" else "SELL"
-                        elif ai_action in ["BUY", "SELL"]:
-                            signal_type = "🟢 Strong Signal"
-                            trade_action = ai_action
-                        else:
-                            logger.info(f"🛡️ {coin}: AI returned WAIT. Standing aside.")
-                            continue
+                        logger.info(f"🛡️ {coin}: AI returned WAIT. Standing aside.")
+                        continue
 
             except Exception as e:
-                # Backup System: Total API Failure -> Technical Fallback
+                # Backup System
                 logger.error(f"🛑 API Error on {coin}: {e}. Falling back to Technical.")
                 signal_type = "🟡 Technical Signal (Fallback)"
                 trade_action = "BUY" if direction == "BULLISH" else "SELL"
 
             if signal_type and trade_action:
                 self.broadcast(coin, signal_type, trade_action, score, data["trigger_reasons"])
-            
-            # Update Cache
-            self.api_cache[coin] = {
-                "candle_ts": candle_ts,
-                "last_call_time": time.time(),
-                "tier": tier
-            }
+                # Save to cache so it doesn't spam
+                self.api_cache[coin] = {
+                    "candle_ts": candle_ts,
+                    "last_call_time": time.time()
+                }
 
     def broadcast(self, coin, sig_type, action, score, triggers):
         logger.info(f"🚀 {sig_type} | {coin} | {action} | {score}")
@@ -309,9 +230,7 @@ class MasterSignalBot:
         except: pass
 
 if __name__ == "__main__":
-    # Start the beautifully designed web dashboard in the background
     threading.Thread(target=run_dashboard_server, daemon=True).start()
-    
     bot = MasterSignalBot(os.getenv("NEWS_API_KEY", ""), os.getenv("CRYPTOCOMPARE_API_KEY", ""), os.getenv("GEMINI_API_KEY", ""))
     fetcher = KuCoinFetcher()
     target_coins = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"]
