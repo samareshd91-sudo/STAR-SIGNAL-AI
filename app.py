@@ -15,9 +15,13 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 from technical_engine import TechnicalEngine
 from news_engine import NewsEngine
 from ai_engine import GeminiAIEngine
+from volatility_engine import VolatilityEngine
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger("BG_STAR_PRO_SmartAPI")
+
+# Global variable for dashboard injection
+VOLATILITY_STATUS = "NORMAL"
 
 # ==========================================
 # 🌐 PROFESSIONAL DASHBOARD UI
@@ -27,11 +31,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return 
 
     def do_GET(self):
+        global VOLATILITY_STATUS
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         
-        html_dashboard = """
+        # Dynamic Status UI Logic
+        status_color = "#059669" # Default Green
+        status_text = "🟢 SYSTEM ONLINE & SCANNING"
+        
+        if VOLATILITY_STATUS == "HIGH":
+            status_color = "#dc2626" # Red
+            status_text = "🔴 HIGH VOLATILITY (PAUSED)"
+        elif VOLATILITY_STATUS == "MEDIUM":
+            status_color = "#f59e0b" # Orange
+            status_text = "🟠 MEDIUM VOLATILITY"
+
+        html_dashboard = f"""
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -40,72 +56,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <meta http-equiv="refresh" content="60">
             <title>BG STAR PRO - Active Dashboard</title>
             <style>
-                body {
-                    background-color: #0f172a;
-                    color: #e2e8f0;
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                    margin: 0;
-                }
-                .dashboard {
-                    background: #1e293b;
-                    padding: 40px;
-                    border-radius: 15px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-                    text-align: center;
-                    max-width: 500px;
-                    width: 90%;
-                    border: 1px solid #334155;
-                }
-                h1 { color: #38bdf8; margin-bottom: 5px; font-size: 28px; }
-                p.subtitle { color: #94a3b8; margin-bottom: 25px; font-size: 14px; }
-                .status {
-                    display: inline-block;
-                    padding: 8px 20px;
-                    background: #059669;
-                    color: white;
-                    border-radius: 25px;
-                    font-weight: bold;
-                    font-size: 14px;
-                    margin-bottom: 25px;
-                    animation: pulse 2s infinite;
-                    box-shadow: 0 0 15px rgba(5, 150, 105, 0.4);
-                }
-                .info-grid {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 15px;
-                    text-align: left;
-                }
-                .info-box {
-                    background: #0f172a;
-                    padding: 15px;
-                    border-radius: 10px;
-                    border: 1px solid #334155;
-                }
-                .info-box span { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }
-                .info-box strong { color: #f8fafc; font-size: 16px; }
-                @keyframes pulse {
-                    0% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.7); }
-                    70% { box-shadow: 0 0 0 10px rgba(5, 150, 105, 0); }
-                    100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0); }
-                }
-                .footer { margin-top: 30px; font-size: 12px; color: #64748b; }
+                body {{ background-color: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+                .dashboard {{ background: #1e293b; padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; max-width: 500px; width: 90%; border: 1px solid #334155; }}
+                h1 {{ color: #38bdf8; margin-bottom: 5px; font-size: 28px; }}
+                p.subtitle {{ color: #94a3b8; margin-bottom: 25px; font-size: 14px; }}
+                .status {{ display: inline-block; padding: 8px 20px; background: {status_color}; color: white; border-radius: 25px; font-weight: bold; font-size: 14px; margin-bottom: 25px; animation: pulse 2s infinite; box-shadow: 0 0 15px {status_color}80; }}
+                .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: left; }}
+                .info-box {{ background: #0f172a; padding: 15px; border-radius: 10px; border: 1px solid #334155; }}
+                .info-box span {{ display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }}
+                .info-box strong {{ color: #f8fafc; font-size: 16px; }}
+                @keyframes pulse {{
+                    0% {{ box-shadow: 0 0 0 0 {status_color}b3; }}
+                    70% {{ box-shadow: 0 0 0 10px rgba(0,0,0,0); }}
+                    100% {{ box-shadow: 0 0 0 0 rgba(0,0,0,0); }}
+                }}
+                .footer {{ margin-top: 30px; font-size: 12px; color: #64748b; }}
             </style>
         </head>
         <body>
             <div class="dashboard">
                 <h1>🚀 BG STAR PRO</h1>
                 <p class="subtitle">Advanced SMC & AI Algorithmic Trading Bot</p>
-                <div class="status">🟢 SYSTEM ONLINE & SCANNING</div>
+                <div class="status">{status_text}</div>
                 <div class="info-grid">
                     <div class="info-box"><span>⚡ Scan Interval</span><strong>15 Seconds</strong></div>
                     <div class="info-box"><span>📰 News Engine</span><strong>Live RSS (Free)</strong></div>
                     <div class="info-box"><span>🎯 Target Assets</span><strong>BTC, ETH, BNB, SOL, XRP, DOGE</strong></div>
                     <div class="info-box"><span>🤖 AI Engine</span><strong>Gemini Pro (Score 76+)</strong></div>
+                    <div class="info-box" style="grid-column: span 2; text-align: center;"><span>⚠️ Market Volatility</span><strong>{VOLATILITY_STATUS}</strong></div>
                 </div>
                 <div class="footer">Dashboard auto-refreshes every 60 seconds.<br>Running securely on Render.</div>
             </div>
@@ -125,15 +103,25 @@ class KuCoinFetcher:
         
     def fetch_live_data(self, coins: list) -> dict:
         data = {}
+        # Fetch 15m for Technical Engine
         for coin in coins:
             try:
                 ohlcv = self.exchange.fetch_ohlcv(f"{coin}/USDT", '15m', limit=100)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 data[coin] = df
-                time.sleep(0.3)
             except Exception as e:
                 logger.error(f"Fetch Error {coin}: {e}")
+                
+        # Fetch 5m specifically for Volatility Engine (BTC Only)
+        try:
+            btc_5m = self.exchange.fetch_ohlcv("BTC/USDT", '5m', limit=100)
+            df_5m = pd.DataFrame(btc_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df_5m['timestamp'] = pd.to_datetime(df_5m['timestamp'], unit='ms')
+            data['BTC_5m'] = df_5m
+        except Exception as e:
+            logger.error(f"Fetch Error BTC 5m: {e}")
+            
         return data
 
 class MasterSignalBot:
@@ -141,9 +129,34 @@ class MasterSignalBot:
         self.tech_engine = TechnicalEngine()
         self.news_engine = NewsEngine(news_key, crypto_key)
         self.ai_engine = GeminiAIEngine(gemini_key)
+        self.vol_engine = VolatilityEngine()
         self.api_cache = {}
 
+    def send_volatility_alert(self):
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not bot_token: return
+        msg = "⚠️ <b>High Market Volatility Detected</b>\n\nSignal generation paused temporarily."
+        try:
+            requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=5)
+        except: pass
+
     def run_cycle(self, live_data: dict):
+        global VOLATILITY_STATUS
+        
+        # Volatility Layer Check using BTC 5m Data
+        btc_df = live_data.get("BTC_5m")
+        if btc_df is None:  # Fallback just in case 5m fails
+            btc_df = live_data.get("BTC")
+            
+        new_high_triggered = self.vol_engine.update(btc_df)
+        VOLATILITY_STATUS = self.vol_engine.current_level
+        
+        if new_high_triggered:
+            self.send_volatility_alert()
+            
+        is_paused = self.vol_engine.is_paused()
+
         logger.info("⚡ Running Ultimate Gatekeeper Scan (Free News -> Gemini on 76+)...")
         tech_results = self.tech_engine.analyze_market(live_data)
 
@@ -155,8 +168,16 @@ class MasterSignalBot:
             direction = data["direction"]
             candle_ts = str(df.iloc[-1]['timestamp'])
 
+            # Apply Level 2 internally (Medium Volatility)
+            if VOLATILITY_STATUS == "MEDIUM":
+                score -= 5
+
             if score < 70:
                 continue 
+
+            # Apply Level 3 internally (High Volatility Block)
+            if is_paused:
+                continue
 
             # Cache Check
             if coin in self.api_cache:
@@ -243,5 +264,6 @@ if __name__ == "__main__":
             bot.run_cycle(fetcher.fetch_live_data(target_coins))
             # Scan time updated to 15 seconds
             time.sleep(15) 
-        except:
+        except Exception as e:
+            logger.exception(f"Critical Loop Error: {e}")
             time.sleep(15)
