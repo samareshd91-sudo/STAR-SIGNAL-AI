@@ -1,7 +1,7 @@
+ccxt
 pandas
+numpy
 requests
 google-generativeai
-streamlit
-python-dotenv
-ccxt
 feedparser
+python-dotenv
