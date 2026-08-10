@@ -10,125 +10,131 @@ logger = logging.getLogger("BG_STAR_PRO_TechEngine")
 
 class TechnicalEngine:
     """
-    Strong Signal Technical Engine
+    Production-style technical signal engine.
 
-    Philosophy:
-        QUALITY > QUANTITY
-
-    Final signal requires:
-        - Closed 15m candle
-        - 1H + 4H alignment
-        - Market structure
-        - EMA trend
-        - ADX strength
-        - directional pressure
-        - displacement
-        - 2-candle confirmation
-        - score >= MIN_SIGNAL_SCORE
-
-    NOTE:
-        OHLCV does not contain true bid/ask delta.
-        Therefore pressure_confirmation is an OHLCV volume-pressure proxy,
-        NOT true exchange CVD.
+    Design goals:
+    - Avoid noisy signals.
+    - Avoid rejecting good setups because of one missing secondary confirmation.
+    - Use closed-candle data only.
+    - Keep HTF/structure as core confirmation.
+    - Use momentum/volume/displacement as supporting confirmation.
+    - Return detailed rejection reasons for diagnostics.
     """
 
-    MIN_SIGNAL_SCORE = 85
+    TARGET_COINS = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"]
+
+    MIN_SIGNAL_SCORE = 82
     STRONG_SIGNAL_SCORE = 90
 
-    MIN_ADX = 22.0
-    MIN_DISPLACEMENT_ATR = 0.80
-
     def __init__(self):
-        self.target_coins = [
-            "BTC",
-            "ETH",
-            "BNB",
-            "SOL",
-            "XRP",
-            "DOGE",
-        ]
+        self.target_coins = self.TARGET_COINS.copy()
 
     # ==========================================================
-    # PUBLIC
+    # PUBLIC MARKET ANALYSIS
     # ==========================================================
 
     def analyze_market(self, market_data: dict) -> dict:
-        results = {}
+        scan_results = {}
 
         for coin in self.target_coins:
-            try:
-                if coin not in market_data:
-                    continue
 
-                bundle = market_data[coin]
+            if coin not in market_data:
+                continue
 
-                if not isinstance(bundle, dict):
-                    # Backward compatibility:
-                    # old architecture may pass only 15m dataframe.
-                    logger.warning(
-                        "%s: HTF data missing; strong signal disabled.",
-                        coin,
-                    )
-                    continue
+            df = market_data[coin]
 
-                df15 = bundle.get("15m")
-                df1h = bundle.get("1h")
-                df4h = bundle.get("4h")
+            if df is None or df.empty:
+                continue
 
-                if not self._valid_dataframe(df15, 60):
-                    continue
-
-                if not self._valid_dataframe(df1h, 60):
-                    continue
-
-                if not self._valid_dataframe(df4h, 60):
-                    continue
-
-                features = self._calculate_smc_features(
-                    df15=df15,
-                    df1h=df1h,
-                    df4h=df4h,
+            if len(df) < 80:
+                logger.warning(
+                    "%s: insufficient candles (%s)",
+                    coin,
+                    len(df),
                 )
+                continue
+
+            try:
+                # --------------------------------------------------
+                # Work only with closed candles.
+                # If exchange returns the currently forming candle,
+                # ignore it.
+                # --------------------------------------------------
+                df = self._prepare_dataframe(df)
+
+                if len(df) < 70:
+                    continue
+
+                features = self._calculate_features(df)
+
+                direction = features["trend_direction"]
 
                 score = self._calculate_dynamic_score(features)
 
-                direction = features.get("trend_direction", "NEUTRAL")
-
-                mandatory_ok, mandatory_reasons = (
-                    self._mandatory_gate(features, direction)
+                mandatory_ok, rejection_reasons = (
+                    self._qualification_gate(
+                        features,
+                        direction,
+                        score,
+                    )
                 )
 
-                approved = (
-                    direction in ("BULLISH", "BEARISH")
+                is_triggered = (
+                    mandatory_ok
                     and score >= self.MIN_SIGNAL_SCORE
-                    and mandatory_ok
                 )
-
-                rejection_reasons = []
 
                 if score < self.MIN_SIGNAL_SCORE:
-                    rejection_reasons.append("score_below_85")
+                    rejection_reasons.append(
+                        f"score_below_{self.MIN_SIGNAL_SCORE}"
+                    )
 
-                rejection_reasons.extend(mandatory_reasons)
+                # Remove duplicate reasons.
+                rejection_reasons = list(
+                    dict.fromkeys(rejection_reasons)
+                )
 
-                if not approved and not rejection_reasons:
-                    rejection_reasons.append("technical_gate_failed")
-
-                triggers = self._build_trigger_reasons(
+                trigger_reasons = self._build_trigger_reasons(
                     features,
                     direction,
                 )
 
-                results[coin] = {
+                scan_results[coin] = {
                     "coin": coin,
                     "features": features,
-                    "is_triggered": approved,
+                    "is_triggered": is_triggered,
                     "technical_score": score,
                     "direction": direction,
-                    "trigger_reasons": triggers,
-                    "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
-                    "confidence_tier": self._confidence_tier(score),
+                    "trigger_reasons": trigger_reasons,
+                    "rejection_reasons": (
+                        []
+                        if is_triggered
+                        else rejection_reasons
+                    ),
+                    "signal_tier": self._get_signal_tier(
+                        score,
+                        features,
+                        is_triggered,
+                    ),
                 }
+
+                if is_triggered:
+                    logger.info(
+                        "✅ QUALIFIED %s | %s | score=%s | "
+                        "tier=%s | triggers=%s",
+                        coin,
+                        direction,
+                        score,
+                        scan_results[coin]["signal_tier"],
+                        ", ".join(trigger_reasons),
+                    )
+                else:
+                    logger.info(
+                        "REJECT %s: score=%s | reasons=%s",
+                        coin,
+                        score,
+                        ", ".join(rejection_reasons),
+                    )
 
             except Exception as exc:
                 logger.exception(
@@ -137,398 +143,132 @@ class TechnicalEngine:
                     exc,
                 )
 
-        return results
+        return scan_results
 
     # ==========================================================
-    # VALIDATION
+    # DATA PREPARATION
     # ==========================================================
 
     @staticmethod
-    def _valid_dataframe(df: pd.DataFrame, minimum_rows: int) -> bool:
-        if df is None or df.empty:
-            return False
+    def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
-        if len(df) < minimum_rows:
-            return False
+        data = df.copy()
 
-        required = {
-            "timestamp",
+        required = [
             "open",
             "high",
             "low",
             "close",
             "volume",
-        }
+        ]
 
-        if not required.issubset(df.columns):
-            return False
+        for column in required:
+            if column not in data.columns:
+                raise ValueError(
+                    f"Missing required column: {column}"
+                )
 
-        return True
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        data = data.dropna(
+            subset=required
+        ).copy()
+
+        data = data.drop_duplicates(
+            subset=["timestamp"]
+            if "timestamp" in data.columns
+            else None
+        )
+
+        data = data.reset_index(drop=True)
+
+        return data
 
     # ==========================================================
-    # MAIN FEATURE ENGINE
+    # FEATURE ENGINE
     # ==========================================================
 
-    def _calculate_smc_features(
+    def _calculate_features(
         self,
-        df15: pd.DataFrame,
-        df1h: pd.DataFrame,
-        df4h: pd.DataFrame,
+        df: pd.DataFrame,
     ) -> Dict[str, Any]:
-
-        df = df15.copy()
-
-        # ------------------------------------------------------
-        # Make absolutely sure the latest candle is treated as
-        # the latest CLOSED candle supplied by data_fetcher.
-        # ------------------------------------------------------
-        df = df.tail(160).reset_index(drop=True)
-
-        latest = df.iloc[-1]
-        previous = df.iloc[-2]
 
         features = {
             "trend_direction": "NEUTRAL",
-            "structure_direction": "NEUTRAL",
-            "htf_direction": "NEUTRAL",
 
             "ema_trend": False,
-            "htf_alignment": False,
-            "structure_confirmation": False,
-            "liquidity_sweep": False,
-            "ob_fvg": False,
-            "adx_strength": False,
-            "volume_confirmation": False,
-            "pressure_confirmation": False,
-            "displacement": False,
-            "candle_confirmation": False,
-
-            "adx_value": 0.0,
-            "atr_value": 0.0,
-            "displacement_ratio": 0.0,
-
             "ema_direction": "NEUTRAL",
-            "pressure_direction": "NEUTRAL",
+
+            "htf_alignment": False,
+            "htf_direction": "NEUTRAL",
+
+            "structure_confirmation": False,
+            "structure_direction": "NEUTRAL",
+
+            "bos_choch": False,
+            "bos_direction": "NEUTRAL",
+
+            "liquidity_sweep": False,
             "liquidity_direction": "NEUTRAL",
+
+            "ob_fvg": False,
             "ob_fvg_direction": "NEUTRAL",
 
-            "one_hour_direction": "NEUTRAL",
-            "four_hour_direction": "NEUTRAL",
+            "adx_strength": False,
+            "adx_direction": "NEUTRAL",
 
-            "close": float(latest["close"]),
-            "candle_timestamp": str(latest["timestamp"]),
+            "pressure_confirmation": False,
+            "pressure_direction": "NEUTRAL",
+
+            "displacement": False,
+            "displacement_direction": "NEUTRAL",
+
+            "candle_confirmation": False,
+            "candle_direction": "NEUTRAL",
+
+            "volume_spike": False,
+            "volume_direction": "NEUTRAL",
+
+            "bullish_points": 0,
+            "bearish_points": 0,
+
+            "atr": 0.0,
+            "adx": 0.0,
+            "volume_ratio": 1.0,
+            "body_ratio": 0.0,
         }
 
-        # ======================================================
-        # 1. ATR
-        # ======================================================
+        # ------------------------------------------------------
+        # Indicators
+        # ------------------------------------------------------
 
-        atr = self._atr(df, 14)
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+        open_price = df["open"]
+        volume = df["volume"]
 
-        if pd.isna(atr.iloc[-1]) or atr.iloc[-1] <= 0:
-            return features
-
-        atr_value = float(atr.iloc[-1])
-        features["atr_value"] = round(atr_value, 8)
-
-        # ======================================================
-        # 2. EMA TREND
-        # ======================================================
-
-        ema20 = df["close"].ewm(
+        ema20 = close.ewm(
             span=20,
             adjust=False,
         ).mean()
-
-        ema50 = df["close"].ewm(
-            span=50,
-            adjust=False,
-        ).mean()
-
-        if (
-            latest["close"] > ema20.iloc[-1]
-            and ema20.iloc[-1] > ema50.iloc[-1]
-        ):
-            features["ema_direction"] = "BULLISH"
-            features["ema_trend"] = True
-
-        elif (
-            latest["close"] < ema20.iloc[-1]
-            and ema20.iloc[-1] < ema50.iloc[-1]
-        ):
-            features["ema_direction"] = "BEARISH"
-            features["ema_trend"] = True
-
-        # ======================================================
-        # 3. REAL HTF ALIGNMENT
-        # ======================================================
-
-        one_hour_direction = self._htf_direction(df1h)
-        four_hour_direction = self._htf_direction(df4h)
-
-        features["one_hour_direction"] = one_hour_direction
-        features["four_hour_direction"] = four_hour_direction
-
-        if (
-            one_hour_direction == "BULLISH"
-            and four_hour_direction == "BULLISH"
-        ):
-            features["htf_direction"] = "BULLISH"
-            features["htf_alignment"] = True
-
-        elif (
-            one_hour_direction == "BEARISH"
-            and four_hour_direction == "BEARISH"
-        ):
-            features["htf_direction"] = "BEARISH"
-            features["htf_alignment"] = True
-
-        # ======================================================
-        # 4. MARKET STRUCTURE / BOS
-        # ======================================================
-
-        lookback = 10
-
-        prior_high = df["high"].iloc[-(lookback + 1):-1].max()
-        prior_low = df["low"].iloc[-(lookback + 1):-1].min()
-
-        structure_direction = "NEUTRAL"
-
-        if latest["close"] > prior_high:
-            structure_direction = "BULLISH"
-            features["structure_confirmation"] = True
-
-        elif latest["close"] < prior_low:
-            structure_direction = "BEARISH"
-            features["structure_confirmation"] = True
-
-        features["structure_direction"] = structure_direction
-
-        # ======================================================
-        # 5. LIQUIDITY SWEEP
-        # ======================================================
-
-        previous_low = df["low"].iloc[-(lookback + 1):-1].min()
-        previous_high = df["high"].iloc[-(lookback + 1):-1].max()
-
-        if (
-            latest["low"] < previous_low
-            and latest["close"] > previous_low
-        ):
-            features["liquidity_sweep"] = True
-            features["liquidity_direction"] = "BULLISH"
-
-        elif (
-            latest["high"] > previous_high
-            and latest["close"] < previous_high
-        ):
-            features["liquidity_sweep"] = True
-            features["liquidity_direction"] = "BEARISH"
-
-        # ======================================================
-        # 6. FVG / OB PROXY
-        # ======================================================
-
-        if len(df) >= 5:
-            c1 = df.iloc[-3]
-            c3 = df.iloc[-1]
-
-            # Bullish FVG:
-            # current low > candle[-3] high
-            if (
-                c3["low"] > c1["high"]
-                and c3["close"] > c1["high"]
-            ):
-                features["ob_fvg"] = True
-                features["ob_fvg_direction"] = "BULLISH"
-
-            # Bearish FVG:
-            # current high < candle[-3] low
-            elif (
-                c3["high"] < c1["low"]
-                and c3["close"] < c1["low"]
-            ):
-                features["ob_fvg"] = True
-                features["ob_fvg_direction"] = "BEARISH"
-
-        # ======================================================
-        # 7. REAL ADX
-        # ======================================================
-
-        adx_series = self._adx(df, 14)
-        adx_value = float(adx_series.iloc[-1])
-
-        if not np.isfinite(adx_value):
-            adx_value = 0.0
-
-        features["adx_value"] = round(adx_value, 2)
-
-        if adx_value >= self.MIN_ADX:
-            features["adx_strength"] = True
-
-        # ======================================================
-        # 8. VOLUME CONFIRMATION
-        # ======================================================
-
-        volume_baseline = (
-            df["volume"]
-            .iloc[-21:-1]
-            .median()
-        )
-
-        if (
-            np.isfinite(volume_baseline)
-            and volume_baseline > 0
-            and latest["volume"] >= volume_baseline * 1.20
-        ):
-            features["volume_confirmation"] = True
-
-        # ======================================================
-        # 9. OHLCV VOLUME-PRESSURE PROXY
-        # ======================================================
-
-        pressure = self._pressure_score(df.tail(6))
-
-        if pressure > 0.12:
-            features["pressure_direction"] = "BULLISH"
-            features["pressure_confirmation"] = True
-
-        elif pressure < -0.12:
-            features["pressure_direction"] = "BEARISH"
-            features["pressure_confirmation"] = True
-
-        # ======================================================
-        # 10. DISPLACEMENT
-        # ======================================================
-
-        candle_body = abs(
-            float(latest["close"]) - float(latest["open"])
-        )
-
-        displacement_ratio = candle_body / atr_value
-        features["displacement_ratio"] = round(
-            displacement_ratio,
-            2,
-        )
-
-        if displacement_ratio >= self.MIN_DISPLACEMENT_ATR:
-            features["displacement"] = True
-
-        # ======================================================
-        # 11. TWO-CANDLE CONFIRMATION
-        # ======================================================
-
-        candle_confirmation = self._two_candle_confirmation(
-            df,
-            ema20,
-        )
-
-        features["candle_confirmation"] = candle_confirmation
-
-        # ======================================================
-        # 12. FINAL DIRECTION
-        # ======================================================
-
-        direction = self._resolve_direction(features)
-
-        features["trend_direction"] = direction
-
-        return features
-
-    # ==========================================================
-    # HTF
-    # ==========================================================
-
-    @staticmethod
-    def _htf_direction(df: pd.DataFrame) -> str:
-        if df is None or len(df) < 60:
-            return "NEUTRAL"
-
-        close = df["close"]
 
         ema50 = close.ewm(
             span=50,
             adjust=False,
         ).mean()
 
-        ema200 = close.ewm(
-            span=200,
+        ema100 = close.ewm(
+            span=100,
             adjust=False,
         ).mean()
 
-        last_close = float(close.iloc[-1])
-        e50 = float(ema50.iloc[-1])
-        e200 = float(ema200.iloc[-1])
-
-        if last_close > e50 and e50 > e200:
-            return "BULLISH"
-
-        if last_close < e50 and e50 < e200:
-            return "BEARISH"
-
-        return "NEUTRAL"
-
-    # ==========================================================
-    # ATR
-    # ==========================================================
-
-    @staticmethod
-    def _atr(
-        df: pd.DataFrame,
-        period: int = 14,
-    ) -> pd.Series:
-
-        previous_close = df["close"].shift(1)
-
-        tr = pd.concat(
-            [
-                df["high"] - df["low"],
-                (df["high"] - previous_close).abs(),
-                (df["low"] - previous_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-
-        return tr.ewm(
-            alpha=1 / period,
-            adjust=False,
-        ).mean()
-
-    # ==========================================================
-    # ADX
-    # ==========================================================
-
-    @classmethod
-    def _adx(
-        cls,
-        df: pd.DataFrame,
-        period: int = 14,
-    ) -> pd.Series:
-
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-
-        up_move = high.diff()
-        down_move = -low.diff()
-
-        plus_dm = pd.Series(
-            np.where(
-                (up_move > down_move) & (up_move > 0),
-                up_move,
-                0.0,
-            ),
-            index=df.index,
-        )
-
-        minus_dm = pd.Series(
-            np.where(
-                (down_move > up_move) & (down_move > 0),
-                down_move,
-                0.0,
-            ),
-            index=df.index,
-        )
+        # ------------------------------------------------------
+        # ATR
+        # ------------------------------------------------------
 
         prev_close = close.shift(1)
 
@@ -541,263 +281,892 @@ class TechnicalEngine:
             axis=1,
         ).max(axis=1)
 
-        atr = tr.ewm(
-            alpha=1 / period,
-            adjust=False,
-        ).mean()
+        atr14 = tr.rolling(14).mean()
 
-        plus_smoothed = plus_dm.ewm(
-            alpha=1 / period,
-            adjust=False,
-        ).mean()
+        # ------------------------------------------------------
+        # ADX
+        # ------------------------------------------------------
 
-        minus_smoothed = minus_dm.ewm(
-            alpha=1 / period,
-            adjust=False,
-        ).mean()
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
 
-        plus_di = 100 * (
-            plus_smoothed / atr.replace(0, np.nan)
+        plus_dm = plus_dm.where(
+            (plus_dm > minus_dm)
+            & (plus_dm > 0),
+            0.0,
         )
 
-        minus_di = 100 * (
-            minus_smoothed / atr.replace(0, np.nan)
+        minus_dm = minus_dm.where(
+            (minus_dm > plus_dm)
+            & (minus_dm > 0),
+            0.0,
         )
 
-        denominator = (
-            plus_di + minus_di
-        ).replace(0, np.nan)
+        atr_safe = atr14.replace(0, np.nan)
+
+        plus_di = (
+            100
+            * plus_dm.rolling(14).mean()
+            / atr_safe
+        )
+
+        minus_di = (
+            100
+            * minus_dm.rolling(14).mean()
+            / atr_safe
+        )
 
         dx = (
             100
             * (plus_di - minus_di).abs()
-            / denominator
-        )
-
-        return dx.ewm(
-            alpha=1 / period,
-            adjust=False,
-        ).mean().fillna(0.0)
-
-    # ==========================================================
-    # PRESSURE PROXY
-    # ==========================================================
-
-    @staticmethod
-    def _pressure_score(df: pd.DataFrame) -> float:
-        if df.empty:
-            return 0.0
-
-        high_low = (
-            df["high"] - df["low"]
-        ).replace(0, np.nan)
-
-        candle_location = (
-            (
-                (df["close"] - df["low"])
-                - (df["high"] - df["close"])
+            / (plus_di + minus_di).replace(
+                0,
+                np.nan,
             )
-            / high_low
-        ).fillna(0.0)
-
-        volume = df["volume"]
-
-        weighted = candle_location * volume
-
-        denominator = volume.sum()
-
-        if denominator <= 0:
-            return 0.0
-
-        return float(weighted.sum() / denominator)
-
-    # ==========================================================
-    # 2-CANDLE CONFIRMATION
-    # ==========================================================
-
-    @staticmethod
-    def _two_candle_confirmation(
-        df: pd.DataFrame,
-        ema20: pd.Series,
-    ) -> bool:
-
-        if len(df) < 3:
-            return False
-
-        c1 = df.iloc[-2]
-        c2 = df.iloc[-1]
-
-        ema1 = ema20.iloc[-2]
-        ema2 = ema20.iloc[-1]
-
-        bullish = (
-            c1["close"] > c1["open"]
-            and c2["close"] > c2["open"]
-            and c1["close"] > ema1
-            and c2["close"] > ema2
-            and c2["close"] >= c1["close"]
         )
 
-        bearish = (
-            c1["close"] < c1["open"]
-            and c2["close"] < c2["open"]
-            and c1["close"] < ema1
-            and c2["close"] < ema2
-            and c2["close"] <= c1["close"]
+        adx = dx.rolling(14).mean()
+
+        # ------------------------------------------------------
+        # Latest closed candle
+        # ------------------------------------------------------
+
+        latest = df.iloc[-1]
+        previous = df.iloc[-2]
+
+        latest_close = float(latest["close"])
+        latest_open = float(latest["open"])
+        latest_high = float(latest["high"])
+        latest_low = float(latest["low"])
+
+        current_atr = float(
+            atr14.iloc[-1]
+            if pd.notna(atr14.iloc[-1])
+            else 0
         )
 
-        return bool(bullish or bearish)
+        current_adx = float(
+            adx.iloc[-1]
+            if pd.notna(adx.iloc[-1])
+            else 0
+        )
+
+        features["atr"] = round(
+            current_atr,
+            8,
+        )
+
+        features["adx"] = round(
+            current_adx,
+            2,
+        )
+
+        # ======================================================
+        # 1. EMA TREND
+        # ======================================================
+
+        ema20_now = float(ema20.iloc[-1])
+        ema50_now = float(ema50.iloc[-1])
+
+        if (
+            latest_close > ema20_now
+            and ema20_now > ema50_now
+        ):
+            features["ema_trend"] = True
+            features["ema_direction"] = "BULLISH"
+
+        elif (
+            latest_close < ema20_now
+            and ema20_now < ema50_now
+        ):
+            features["ema_trend"] = True
+            features["ema_direction"] = "BEARISH"
+
+        # ======================================================
+        # 2. HTF PROXY
+        # ======================================================
+
+        ema100_now = float(ema100.iloc[-1])
+
+        if (
+            latest_close > ema50_now
+            and ema50_now > ema100_now
+        ):
+            features["htf_alignment"] = True
+            features["htf_direction"] = "BULLISH"
+
+        elif (
+            latest_close < ema50_now
+            and ema50_now < ema100_now
+        ):
+            features["htf_alignment"] = True
+            features["htf_direction"] = "BEARISH"
+
+        # ======================================================
+        # 3. MARKET STRUCTURE / BOS
+        # ======================================================
+
+        swing_high = (
+            high.iloc[-11:-1].max()
+        )
+
+        swing_low = (
+            low.iloc[-11:-1].min()
+        )
+
+        if latest_close > swing_high:
+
+            features["bos_choch"] = True
+            features["bos_direction"] = "BULLISH"
+
+            features["structure_confirmation"] = True
+            features["structure_direction"] = "BULLISH"
+
+        elif latest_close < swing_low:
+
+            features["bos_choch"] = True
+            features["bos_direction"] = "BEARISH"
+
+            features["structure_confirmation"] = True
+            features["structure_direction"] = "BEARISH"
+
+        else:
+
+            # Structure can also be confirmed by consecutive
+            # higher-high/higher-low or lower-high/lower-low
+            # behavior. This prevents good trends from being
+            # rejected simply because the latest candle did not
+            # print a fresh BOS.
+
+            recent = df.iloc[-6:]
+
+            higher_highs = (
+                recent["high"].iloc[-1]
+                > recent["high"].iloc[-3]
+            )
+
+            higher_lows = (
+                recent["low"].iloc[-1]
+                > recent["low"].iloc[-3]
+            )
+
+            lower_highs = (
+                recent["high"].iloc[-1]
+                < recent["high"].iloc[-3]
+            )
+
+            lower_lows = (
+                recent["low"].iloc[-1]
+                < recent["low"].iloc[-3]
+            )
+
+            if higher_highs and higher_lows:
+                features[
+                    "structure_confirmation"
+                ] = True
+                features[
+                    "structure_direction"
+                ] = "BULLISH"
+
+            elif lower_highs and lower_lows:
+                features[
+                    "structure_confirmation"
+                ] = True
+                features[
+                    "structure_direction"
+                ] = "BEARISH"
+
+        # ======================================================
+        # 4. LIQUIDITY SWEEP
+        # ======================================================
+
+        previous_range_high = (
+            high.iloc[-12:-2].max()
+        )
+
+        previous_range_low = (
+            low.iloc[-12:-2].min()
+        )
+
+        bullish_sweep = (
+            latest_low < previous_range_low
+            and latest_close > previous_range_low
+        )
+
+        bearish_sweep = (
+            latest_high > previous_range_high
+            and latest_close < previous_range_high
+        )
+
+        if bullish_sweep:
+            features["liquidity_sweep"] = True
+            features["liquidity_direction"] = "BULLISH"
+
+        elif bearish_sweep:
+            features["liquidity_sweep"] = True
+            features["liquidity_direction"] = "BEARISH"
+
+        # ======================================================
+        # 5. OB / FVG STYLE LOCATION
+        # ======================================================
+
+        range_high = float(
+            high.iloc[-20:-1].max()
+        )
+
+        range_low = float(
+            low.iloc[-20:-1].min()
+        )
+
+        range_size = range_high - range_low
+
+        if range_size > 0:
+
+            discount = (
+                range_low
+                + range_size * 0.35
+            )
+
+            premium = (
+                range_high
+                - range_size * 0.35
+            )
+
+            if (
+                latest_low <= discount
+                and latest_close > discount
+            ):
+                features["ob_fvg"] = True
+                features[
+                    "ob_fvg_direction"
+                ] = "BULLISH"
+
+            elif (
+                latest_high >= premium
+                and latest_close < premium
+            ):
+                features["ob_fvg"] = True
+                features[
+                    "ob_fvg_direction"
+                ] = "BEARISH"
+
+        # ======================================================
+        # 6. ADX / MOMENTUM
+        # ======================================================
+
+        previous_adx = float(
+            adx.iloc[-2]
+            if pd.notna(adx.iloc[-2])
+            else 0
+        )
+
+        adx_rising = (
+            current_adx >= 18
+            and current_adx >= previous_adx
+        )
+
+        if adx_rising:
+
+            if (
+                plus_di.iloc[-1]
+                > minus_di.iloc[-1]
+            ):
+                features["adx_strength"] = True
+                features[
+                    "adx_direction"
+                ] = "BULLISH"
+
+            elif (
+                minus_di.iloc[-1]
+                > plus_di.iloc[-1]
+            ):
+                features["adx_strength"] = True
+                features[
+                    "adx_direction"
+                ] = "BEARISH"
+
+        # ======================================================
+        # 7. PRESSURE
+        # ======================================================
+
+        candle_range = max(
+            latest_high - latest_low,
+            1e-12,
+        )
+
+        buying_pressure = (
+            latest_close - latest_low
+        ) / candle_range
+
+        selling_pressure = (
+            latest_high - latest_close
+        ) / candle_range
+
+        if (
+            latest_close > latest_open
+            and buying_pressure >= 0.60
+        ):
+            features[
+                "pressure_confirmation"
+            ] = True
+
+            features[
+                "pressure_direction"
+            ] = "BULLISH"
+
+        elif (
+            latest_close < latest_open
+            and selling_pressure >= 0.60
+        ):
+            features[
+                "pressure_confirmation"
+            ] = True
+
+            features[
+                "pressure_direction"
+            ] = "BEARISH"
+
+        # ======================================================
+        # 8. DISPLACEMENT
+        # ======================================================
+
+        body = abs(
+            latest_close - latest_open
+        )
+
+        body_ratio = body / candle_range
+
+        features["body_ratio"] = round(
+            body_ratio,
+            3,
+        )
+
+        average_atr = (
+            atr14.iloc[-6:-1].mean()
+        )
+
+        if (
+            pd.notna(average_atr)
+            and average_atr > 0
+            and body >= average_atr * 0.65
+            and body_ratio >= 0.55
+        ):
+
+            if latest_close > latest_open:
+                features[
+                    "displacement"
+                ] = True
+
+                features[
+                    "displacement_direction"
+                ] = "BULLISH"
+
+            else:
+                features[
+                    "displacement"
+                ] = True
+
+                features[
+                    "displacement_direction"
+                ] = "BEARISH"
+
+        # ======================================================
+        # 9. TWO CANDLE CONFIRMATION
+        # ======================================================
+
+        previous_body = abs(
+            float(previous["close"])
+            - float(previous["open"])
+        )
+
+        previous_bullish = (
+            previous["close"]
+            > previous["open"]
+        )
+
+        previous_bearish = (
+            previous["close"]
+            < previous["open"]
+        )
+
+        current_bullish = (
+            latest_close > latest_open
+        )
+
+        current_bearish = (
+            latest_close < latest_open
+        )
+
+        if (
+            previous_bullish
+            and current_bullish
+            and body >= previous_body * 0.75
+        ):
+
+            features[
+                "candle_confirmation"
+            ] = True
+
+            features[
+                "candle_direction"
+            ] = "BULLISH"
+
+        elif (
+            previous_bearish
+            and current_bearish
+            and body >= previous_body * 0.75
+        ):
+
+            features[
+                "candle_confirmation"
+            ] = True
+
+            features[
+                "candle_direction"
+            ] = "BEARISH"
+
+        # ======================================================
+        # 10. VOLUME
+        # ======================================================
+
+        volume_average = (
+            volume.iloc[-21:-1].mean()
+        )
+
+        if (
+            pd.notna(volume_average)
+            and volume_average > 0
+        ):
+
+            volume_ratio = (
+                float(latest["volume"])
+                / float(volume_average)
+            )
+
+            features["volume_ratio"] = round(
+                volume_ratio,
+                2,
+            )
+
+            if volume_ratio >= 1.35:
+
+                features[
+                    "volume_spike"
+                ] = True
+
+                if current_bullish:
+                    features[
+                        "volume_direction"
+                    ] = "BULLISH"
+
+                elif current_bearish:
+                    features[
+                        "volume_direction"
+                    ] = "BEARISH"
+
+        # ======================================================
+        # FINAL DIRECTION
+        # ======================================================
+
+        bullish_votes = 0
+        bearish_votes = 0
+
+        directional_features = [
+            (
+                features["ema_direction"],
+                2,
+            ),
+            (
+                features["htf_direction"],
+                3,
+            ),
+            (
+                features["structure_direction"],
+                3,
+            ),
+            (
+                features["bos_direction"],
+                2,
+            ),
+            (
+                features["liquidity_direction"],
+                1,
+            ),
+            (
+                features["ob_fvg_direction"],
+                1,
+            ),
+            (
+                features["adx_direction"],
+                1,
+            ),
+            (
+                features["pressure_direction"],
+                2,
+            ),
+            (
+                features["displacement_direction"],
+                2,
+            ),
+            (
+                features["candle_direction"],
+                1,
+            ),
+            (
+                features["volume_direction"],
+                1,
+            ),
+        ]
+
+        for direction_value, weight in directional_features:
+
+            if direction_value == "BULLISH":
+                bullish_votes += weight
+
+            elif direction_value == "BEARISH":
+                bearish_votes += weight
+
+        features["bullish_points"] = bullish_votes
+        features["bearish_points"] = bearish_votes
+
+        if bullish_votes >= bearish_votes + 2:
+            features[
+                "trend_direction"
+            ] = "BULLISH"
+
+        elif bearish_votes >= bullish_votes + 2:
+            features[
+                "trend_direction"
+            ] = "BEARISH"
+
+        else:
+            features[
+                "trend_direction"
+            ] = "NEUTRAL"
+
+        return features
 
     # ==========================================================
-    # DIRECTION
+    # SCORING
     # ==========================================================
 
-    @staticmethod
-    def _resolve_direction(features: Dict[str, Any]) -> str:
-
-        bullish = 0
-        bearish = 0
-
-        def add(direction, points):
-            nonlocal bullish, bearish
-
-            if direction == "BULLISH":
-                bullish += points
-
-            elif direction == "BEARISH":
-                bearish += points
-
-        add(features["htf_direction"], 5)
-        add(features["ema_direction"], 3)
-        add(features["structure_direction"], 5)
-        add(features["pressure_direction"], 3)
-        add(features["liquidity_direction"], 2)
-        add(features["ob_fvg_direction"], 2)
-
-        if bullish >= bearish + 3:
-            return "BULLISH"
-
-        if bearish >= bullish + 3:
-            return "BEARISH"
-
-        return "NEUTRAL"
-
-    # ==========================================================
-    # SCORE
-    # ==========================================================
-
-    @staticmethod
     def _calculate_dynamic_score(
+        self,
         features: Dict[str, Any],
     ) -> int:
 
-        score = 0
-        direction = features["trend_direction"]
+        direction = features[
+            "trend_direction"
+        ]
 
-        if direction == "NEUTRAL":
+        if direction not in (
+            "BULLISH",
+            "BEARISH",
+        ):
             return 0
+
+        score = 0
+
+        # ------------------------------------------------------
+        # CORE
+        # ------------------------------------------------------
 
         if (
             features["htf_alignment"]
-            and features["htf_direction"] == direction
+            and features["htf_direction"]
+            == direction
         ):
             score += 20
 
         if (
-            features["structure_confirmation"]
-            and features["structure_direction"] == direction
+            features[
+                "structure_confirmation"
+            ]
+            and features[
+                "structure_direction"
+            ]
+            == direction
         ):
-            score += 18
+            score += 20
 
         if (
             features["ema_trend"]
-            and features["ema_direction"] == direction
+            and features["ema_direction"]
+            == direction
         ):
             score += 10
 
-        if features["adx_strength"]:
-            score += 10
+        # ------------------------------------------------------
+        # MOMENTUM
+        # ------------------------------------------------------
 
         if (
-            features["pressure_confirmation"]
-            and features["pressure_direction"] == direction
+            features["adx_strength"]
+            and features["adx_direction"]
+            == direction
         ):
             score += 10
 
-        if features["displacement"]:
+        if (
+            features[
+                "pressure_confirmation"
+            ]
+            and features[
+                "pressure_direction"
+            ]
+            == direction
+        ):
             score += 10
 
         if (
-            features["candle_confirmation"]
+            features["displacement"]
+            and features[
+                "displacement_direction"
+            ]
+            == direction
         ):
-            score += 8
+            score += 10
 
         if (
-            features["ob_fvg"]
-            and features["ob_fvg_direction"] == direction
+            features[
+                "candle_confirmation"
+            ]
+            and features[
+                "candle_direction"
+            ]
+            == direction
         ):
             score += 6
 
+        # ------------------------------------------------------
+        # LOCATION / LIQUIDITY
+        # ------------------------------------------------------
+
+        if (
+            features["ob_fvg"]
+            and features[
+                "ob_fvg_direction"
+            ]
+            == direction
+        ):
+            score += 5
+
         if (
             features["liquidity_sweep"]
-            and features["liquidity_direction"] == direction
+            and features[
+                "liquidity_direction"
+            ]
+            == direction
+        ):
+            score += 5
+
+        # ------------------------------------------------------
+        # VOLUME
+        # ------------------------------------------------------
+
+        if (
+            features["volume_spike"]
+            and features[
+                "volume_direction"
+            ] == direction
         ):
             score += 4
 
-        if features["volume_confirmation"]:
-            score += 4
+        # ------------------------------------------------------
+        # Confluence bonus
+        # ------------------------------------------------------
 
-        return min(100, int(score))
+        confirmations = 0
+
+        for key, direction_key in [
+            (
+                "adx_strength",
+                "adx_direction",
+            ),
+            (
+                "pressure_confirmation",
+                "pressure_direction",
+            ),
+            (
+                "displacement",
+                "displacement_direction",
+            ),
+            (
+                "candle_confirmation",
+                "candle_direction",
+            ),
+        ]:
+
+            if (
+                features[key]
+                and features[direction_key]
+                == direction
+            ):
+                confirmations += 1
+
+        if confirmations >= 3:
+            score += 5
+
+        elif confirmations >= 2:
+            score += 2
+
+        return min(
+            100,
+            int(score),
+        )
 
     # ==========================================================
-    # HARD FILTER
+    # QUALIFICATION GATE
     # ==========================================================
 
-    @staticmethod
-    def _mandatory_gate(
+    def _qualification_gate(
+        self,
         features: Dict[str, Any],
         direction: str,
+        score: int,
     ):
+
         reasons = []
 
-        if direction == "NEUTRAL":
-            reasons.append("direction_neutral")
+        if direction not in (
+            "BULLISH",
+            "BEARISH",
+        ):
+            return False, [
+                "direction_neutral"
+            ]
+
+        # ------------------------------------------------------
+        # CORE GATES
+        # ------------------------------------------------------
+
+        htf_ok = (
+            features["htf_alignment"]
+            and features["htf_direction"]
+            == direction
+        )
+
+        structure_ok = (
+            features[
+                "structure_confirmation"
+            ]
+            and features[
+                "structure_direction"
+            ] == direction
+        )
+
+        ema_ok = (
+            features["ema_trend"]
+            and features[
+                "ema_direction"
+            ] == direction
+        )
+
+        if not htf_ok:
+            reasons.append(
+                "htf_not_aligned"
+            )
+
+        if not structure_ok:
+            reasons.append(
+                "structure_not_confirmed"
+            )
+
+        if not ema_ok:
+            reasons.append(
+                "ema_trend_not_confirmed"
+            )
+
+        # Core structure remains mandatory.
+        if not (
+            htf_ok
+            and structure_ok
+            and ema_ok
+        ):
             return False, reasons
 
-        if not features["htf_alignment"]:
-            reasons.append("htf_not_aligned")
+        # ------------------------------------------------------
+        # SUPPORTING CONFIRMATIONS
+        # ------------------------------------------------------
 
-        elif features["htf_direction"] != direction:
-            reasons.append("htf_direction_conflict")
+        support = []
 
-        if not features["structure_confirmation"]:
-            reasons.append("structure_not_confirmed")
+        if (
+            features["adx_strength"]
+            and features[
+                "adx_direction"
+            ] == direction
+        ):
+            support.append("ADX")
 
-        elif features["structure_direction"] != direction:
-            reasons.append("structure_direction_conflict")
+        if (
+            features[
+                "pressure_confirmation"
+            ]
+            and features[
+                "pressure_direction"
+            ] == direction
+        ):
+            support.append("PRESSURE")
 
-        if not features["ema_trend"]:
-            reasons.append("ema_trend_not_confirmed")
+        if (
+            features["displacement"]
+            and features[
+                "displacement_direction"
+            ] == direction
+        ):
+            support.append(
+                "DISPLACEMENT"
+            )
 
-        elif features["ema_direction"] != direction:
-            reasons.append("ema_direction_conflict")
+        if (
+            features[
+                "candle_confirmation"
+            ]
+            and features[
+                "candle_direction"
+            ] == direction
+        ):
+            support.append(
+                "TWO_CANDLE"
+            )
 
-        if not features["adx_strength"]:
-            reasons.append("weak_adx")
+        # Need at least 2 supporting confirmations.
+        if len(support) < 2:
 
-        if not features["pressure_confirmation"]:
-            reasons.append("pressure_not_confirmed")
+            reasons.append(
+                "insufficient_momentum_confirmation"
+            )
 
-        elif features["pressure_direction"] != direction:
-            reasons.append("pressure_direction_conflict")
+            if not features["adx_strength"]:
+                reasons.append(
+                    "weak_adx"
+                )
 
-        if not features["displacement"]:
-            reasons.append("weak_displacement")
+            if not features[
+                "pressure_confirmation"
+            ]:
+                reasons.append(
+                    "pressure_not_confirmed"
+                )
 
-        if not features["candle_confirmation"]:
-            reasons.append("two_candle_confirmation_failed")
+            if not features[
+                "displacement"
+            ]:
+                reasons.append(
+                    "weak_displacement"
+                )
 
-        return len(reasons) == 0, reasons
+            if not features[
+                "candle_confirmation"
+            ]:
+                reasons.append(
+                    "two_candle_confirmation_failed"
+                )
+
+            return False, reasons
+
+        return True, []
 
     # ==========================================================
     # TRIGGER REASONS
@@ -814,68 +1183,103 @@ class TechnicalEngine:
         mapping = [
             (
                 "htf_alignment",
-                features["htf_alignment"],
+                "HTF Alignment",
+                "htf_direction",
             ),
             (
                 "structure_confirmation",
-                features["structure_confirmation"],
+                "Market Structure",
+                "structure_direction",
+            ),
+            (
+                "bos_choch",
+                "BOS/CHOCH",
+                "bos_direction",
             ),
             (
                 "ema_trend",
-                features["ema_trend"],
+                "EMA Trend",
+                "ema_direction",
             ),
             (
                 "adx_strength",
-                features["adx_strength"],
+                "ADX Momentum",
+                "adx_direction",
             ),
             (
                 "pressure_confirmation",
-                features["pressure_confirmation"],
+                "Price Pressure",
+                "pressure_direction",
             ),
             (
                 "displacement",
-                features["displacement"],
+                "Displacement",
+                "displacement_direction",
             ),
             (
                 "candle_confirmation",
-                features["candle_confirmation"],
-            ),
-            (
-                "ob_fvg",
-                features["ob_fvg"],
+                "2-Candle Confirmation",
+                "candle_direction",
             ),
             (
                 "liquidity_sweep",
-                features["liquidity_sweep"],
+                "Liquidity Sweep",
+                "liquidity_direction",
             ),
             (
-                "volume_confirmation",
-                features["volume_confirmation"],
+                "ob_fvg",
+                "OB/FVG",
+                "ob_fvg_direction",
+            ),
+            (
+                "volume_spike",
+                "Volume Confirmation",
+                "volume_direction",
             ),
         ]
 
-        for name, enabled in mapping:
-            if enabled:
-                reasons.append(name)
+        for feature_key, label, direction_key in mapping:
+
+            if (
+                features.get(feature_key)
+                and features.get(
+                    direction_key
+                ) == direction
+            ):
+                reasons.append(label)
 
         return reasons
 
     # ==========================================================
-    # TIER
+    # SIGNAL TIER
     # ==========================================================
 
     @staticmethod
-    def _confidence_tier(score: int) -> str:
-        if score >= 95:
-            return "ELITE"
+    def _get_signal_tier(
+        score: int,
+        features: Dict[str, Any],
+        is_triggered: bool,
+    ):
+
+        if not is_triggered:
+            return "REJECTED"
 
         if score >= 90:
-            return "STRONG"
+            return "A+ STRONG"
 
-        if score >= 85:
-            return "VALID"
+        if score >= 86:
+            return "A STRONG"
 
-        if score >= 75:
-            return "WATCH"
+        return "QUALIFIED"
 
-        return "REJECT"
+    # ==========================================================
+    # HELPER FOR EXTERNAL USE
+    # ==========================================================
+
+    @classmethod
+    def is_strong_signal(
+        cls,
+        score: int,
+    ) -> bool:
+
+        return score >= cls.STRONG_SIGNAL_SCORE
