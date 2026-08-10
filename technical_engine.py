@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -10,232 +10,779 @@ logger = logging.getLogger("BG_STAR_PRO_TechnicalEngine")
 
 class TechnicalEngine:
     """
-    BG STAR PRO - Technical Signal Engine
+    BG STAR PRO - Robust Technical Signal Engine
 
-    Main responsibilities:
-    - Accept market data as dict or DataFrame
-    - Normalize OHLCV data safely
-    - Calculate trend / momentum / volume / structure
-    - Generate BUY / SELL candidates
-    - Reject weak setups
-    - Return clean candidate dictionaries for app.py
+    Main goals:
+    - Never crash when market data is dict/list/DataFrame.
+    - Always return a dictionary from analyze_market().
+    - Produce stable technical scores.
+    - Avoid false signals from incomplete candles/data.
+    - Keep output compatible with app.py:
+          for coin, data in tech_results.items():
+              ...
     """
 
-    def __init__(
-        self,
-        minimum_score: int = 70,
-        strong_score: int = 85,
-    ):
-        self.minimum_score = minimum_score
-        self.strong_score = strong_score
+    def __init__(self):
+        self.minimum_bars = 30
+        self.minimum_score = 70
 
-        self.assets = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"]
+    # ==========================================================
+    # PUBLIC ENTRY POINT
+    # ==========================================================
 
-    # ============================================================
-    # PUBLIC METHOD
-    # ============================================================
-
-    def analyze_market(self, live_data: Any) -> List[Dict[str, Any]]:
+    def analyze_market(self, market_data: Any) -> Dict[str, Dict[str, Any]]:
         """
-        Main entry point used by app.py.
+        Analyze all available assets.
 
-        Supports:
-            DataFrame
-            {
-                "BTC": DataFrame,
-                "ETH": DataFrame,
-                ...
-            }
-
-        Also supports:
-            {
-                "BTC": {...},
-                "ETH": {...}
-            }
+        IMPORTANT:
+        This always returns a DICT.
         """
 
-        datasets = self._normalize_market_data(live_data)
+        results: Dict[str, Dict[str, Any]] = {}
 
-        if not datasets:
-            logger.warning("Technical Engine: no usable market data received.")
-            return []
+        if market_data is None:
+            return results
 
-        candidates: List[Dict[str, Any]] = []
+        # ------------------------------------------------------
+        # Case 1: pandas DataFrame = single market dataset
+        # ------------------------------------------------------
+        if isinstance(market_data, pd.DataFrame):
+            result = self._analyze_dataframe(market_data, "MARKET")
 
-        for asset, raw_df in datasets.items():
+            if result is not None:
+                results["MARKET"] = result
 
-            try:
-                df = self._prepare_dataframe(raw_df)
+            return results
 
-                if df is None or df.empty:
-                    logger.info(f"REJECT {asset}: empty_market_data")
-                    continue
+        # ------------------------------------------------------
+        # Case 2: dictionary
+        #
+        # Usually:
+        # {
+        #     "BTC": dataframe/dict/list,
+        #     "ETH": dataframe/dict/list,
+        #     ...
+        # }
+        # ------------------------------------------------------
+        if isinstance(market_data, dict):
 
-                if len(df) < 30:
-                    logger.info(
-                        f"REJECT {asset}: insufficient_data "
-                        f"(rows={len(df)}, required=30)"
-                    )
-                    continue
-
-                result = self._analyze_single_asset(asset, df)
-
-                if result is None:
-                    continue
-
-                score = int(result.get("score", 0))
-                reasons = result.get("rejection_reasons", [])
-
-                if score < self.minimum_score:
-                    if not reasons:
-                        reasons = ["score_below_minimum"]
-
-                    logger.info(
-                        f"REJECT {asset}: score={score} < "
-                        f"{self.minimum_score} | {reasons}"
-                    )
-                    continue
-
-                candidates.append(result)
-
-                logger.info(
-                    f"CANDIDATE {asset}: "
-                    f"{result['action']} | score={score} | "
-                    f"triggers={result.get('triggers', [])}"
-                )
-
-            except Exception as exc:
-                logger.exception(
-                    f"Technical Engine error for {asset}: {exc}"
-                )
-
-        # Highest-quality candidates first
-        candidates.sort(
-            key=lambda x: x.get("score", 0),
-            reverse=True
-        )
-
-        return candidates
-
-    # ============================================================
-    # DATA NORMALIZATION
-    # ============================================================
-
-    def _normalize_market_data(
-        self,
-        live_data: Any
-    ) -> Dict[str, Any]:
-
-        if live_data is None:
-            return {}
-
-        # Direct DataFrame
-        if isinstance(live_data, pd.DataFrame):
-            return {"BTC": live_data}
-
-        # Dictionary
-        if isinstance(live_data, dict):
-
-            # Case:
-            # {"BTC": DataFrame, "ETH": DataFrame}
-            if any(
-                isinstance(v, pd.DataFrame)
-                for v in live_data.values()
-            ):
-                return {
-                    str(k).upper(): v
-                    for k, v in live_data.items()
-                    if v is not None
-                }
-
-            # Case:
-            # {"BTC": {"open": [...], ...}}
-            result = {}
-
-            for key, value in live_data.items():
-
-                if isinstance(value, pd.DataFrame):
-                    result[str(key).upper()] = value
-
-                elif isinstance(value, dict):
-
-                    try:
-                        df = pd.DataFrame(value)
-
-                        if not df.empty:
-                            result[str(key).upper()] = df
-
-                    except Exception:
-                        continue
-
-            # Case:
-            # {"open": [...], "high": [...], ...}
-            if not result and self._looks_like_ohlcv_dict(live_data):
+            for coin, raw_data in market_data.items():
 
                 try:
-                    return {
-                        "BTC": pd.DataFrame(live_data)
-                    }
-                except Exception:
-                    return {}
+                    # Ignore metadata/scalar values.
+                    if not self._looks_like_market_data(raw_data):
+                        continue
 
-            return result
+                    result = self._analyze_any(raw_data, str(coin))
 
-        logger.error(
-            f"Unsupported live_data type: {type(live_data)}"
+                    if result is not None:
+                        results[str(coin)] = result
+
+                except Exception as exc:
+                    logger.exception(
+                        "Technical analysis failed for %s: %s",
+                        coin,
+                        exc
+                    )
+
+                    # Never stop the complete cycle because of one coin.
+                    results[str(coin)] = self._empty_result(
+                        str(coin),
+                        reason="analysis_error"
+                    )
+
+            return results
+
+        # ------------------------------------------------------
+        # Case 3: list
+        #
+        # This can happen if the fetcher returns:
+        # [
+        #     {"symbol":"BTC", ...},
+        #     {"symbol":"ETH", ...}
+        # ]
+        # ------------------------------------------------------
+        if isinstance(market_data, list):
+
+            for index, item in enumerate(market_data):
+
+                try:
+                    if not isinstance(item, dict):
+                        continue
+
+                    coin = (
+                        item.get("symbol")
+                        or item.get("coin")
+                        or item.get("asset")
+                        or f"ASSET_{index}"
+                    )
+
+                    result = self._analyze_any(item, str(coin))
+
+                    if result is not None:
+                        results[str(coin)] = result
+
+                except Exception as exc:
+                    logger.exception(
+                        "Technical list item failed: %s",
+                        exc
+                    )
+
+            return results
+
+        logger.warning(
+            "Unsupported market_data type: %s",
+            type(market_data).__name__
         )
 
-        return {}
+        return results
 
-    def _looks_like_ohlcv_dict(self, data: Dict[str, Any]) -> bool:
+    # ==========================================================
+    # UNIVERSAL DATA HANDLER
+    # ==========================================================
 
-        required_groups = [
-            {"open", "high", "low", "close"},
-            {"Open", "High", "Low", "Close"},
-        ]
-
-        keys = set(data.keys())
-
-        for group in required_groups:
-            if group.issubset(keys):
-                return True
-
-        return False
-
-    # ============================================================
-    # DATAFRAME PREPARATION
-    # ============================================================
-
-    def _prepare_dataframe(
+    def _analyze_any(
         self,
-        raw_df: Any
-    ) -> Optional[pd.DataFrame]:
+        raw_data: Any,
+        coin: str
+    ) -> Optional[Dict[str, Any]]:
 
-        if raw_df is None:
+        # DataFrame
+        if isinstance(raw_data, pd.DataFrame):
+            return self._analyze_dataframe(raw_data, coin)
+
+        # Dictionary
+        if isinstance(raw_data, dict):
+
+            # Sometimes a single candle dict is supplied.
+            if self._looks_like_candle(raw_data):
+                df = self._dict_to_dataframe(raw_data)
+
+            # Sometimes data is nested.
+            elif "data" in raw_data:
+                df = self._to_dataframe(raw_data["data"])
+
+            elif "candles" in raw_data:
+                df = self._to_dataframe(raw_data["candles"])
+
+            elif "ohlcv" in raw_data:
+                df = self._to_dataframe(raw_data["ohlcv"])
+
+            else:
+                df = self._dict_to_dataframe(raw_data)
+
+            if df is None or df.empty:
+                return self._empty_result(
+                    coin,
+                    reason="empty_market_data"
+                )
+
+            return self._analyze_dataframe(df, coin)
+
+        # List
+        if isinstance(raw_data, list):
+            df = self._to_dataframe(raw_data)
+
+            if df is None or df.empty:
+                return self._empty_result(
+                    coin,
+                    reason="empty_market_data"
+                )
+
+            return self._analyze_dataframe(df, coin)
+
+        return None
+
+    # ==========================================================
+    # DATAFRAME CONVERSION
+    # ==========================================================
+
+    def _to_dataframe(self, data: Any) -> Optional[pd.DataFrame]:
+
+        if data is None:
             return None
 
-        if isinstance(raw_df, dict):
+        if isinstance(data, pd.DataFrame):
+            return data.copy()
+
+        if isinstance(data, list):
+
+            if not data:
+                return None
 
             try:
-                raw_df = pd.DataFrame(raw_df)
+                return pd.DataFrame(data)
             except Exception as exc:
                 logger.error(
-                    f"Could not convert dict to DataFrame: {exc}"
+                    "Could not convert list to DataFrame: %s",
+                    exc
                 )
                 return None
 
-        if not isinstance(raw_df, pd.DataFrame):
+        if isinstance(data, dict):
+
+            # OHLCV column dictionary
+            try:
+
+                values = list(data.values())
+
+                # If values contain lists, this is probably
+                # column-oriented market data.
+                if values and any(
+                    isinstance(v, (list, tuple, np.ndarray, pd.Series))
+                    for v in values
+                ):
+                    return pd.DataFrame(data)
+
+                # Single candle/scalar dictionary.
+                return pd.DataFrame([data])
+
+            except Exception as exc:
+                logger.error(
+                    "Could not convert dict to DataFrame: %s",
+                    exc
+                )
+                return None
+
+        return None
+
+    def _dict_to_dataframe(
+        self,
+        data: Dict[str, Any]
+    ) -> Optional[pd.DataFrame]:
+
+        if not data:
             return None
 
-        if raw_df.empty:
+        try:
+            return pd.DataFrame([data])
+        except Exception:
             return None
 
-        df = raw_df.copy()
+    # ==========================================================
+    # MARKET DATA VALIDATION
+    # ==========================================================
+
+    def _looks_like_market_data(self, data: Any) -> bool:
+
+        if isinstance(data, pd.DataFrame):
+            return not data.empty
+
+        if isinstance(data, list):
+            return len(data) > 0
+
+        if isinstance(data, dict):
+
+            market_keys = {
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "data",
+                "candles",
+                "ohlcv"
+            }
+
+            return bool(
+                market_keys.intersection(
+                    {str(k).lower() for k in data.keys()}
+                )
+            )
+
+        return False
+
+    def _looks_like_candle(self, data: Dict[str, Any]) -> bool:
+
+        keys = {
+            str(k).lower()
+            for k in data.keys()
+        }
+
+        required = {"open", "high", "low", "close"}
+
+        return required.issubset(keys)
+
+    # ==========================================================
+    # MAIN TECHNICAL ANALYSIS
+    # ==========================================================
+
+    def _analyze_dataframe(
+        self,
+        df: pd.DataFrame,
+        coin: str
+    ) -> Dict[str, Any]:
+
+        try:
+
+            df = self._prepare_dataframe(df)
+
+            if df is None or df.empty:
+                return self._empty_result(
+                    coin,
+                    reason="empty_market_data"
+                )
+
+            if len(df) < self.minimum_bars:
+                return self._empty_result(
+                    coin,
+                    reason=f"insufficient_bars_{len(df)}"
+                )
+
+            # --------------------------------------------------
+            # Indicators
+            # --------------------------------------------------
+
+            df["ema9"] = df["close"].ewm(
+                span=9,
+                adjust=False
+            ).mean()
+
+            df["ema21"] = df["close"].ewm(
+                span=21,
+                adjust=False
+            ).mean()
+
+            df["ema50"] = df["close"].ewm(
+                span=50,
+                adjust=False
+            ).mean()
+
+            # RSI
+            delta = df["close"].diff()
+
+            gain = delta.clip(lower=0)
+            loss = -delta.clip(upper=0)
+
+            avg_gain = gain.rolling(14).mean()
+            avg_loss = loss.rolling(14).mean()
+
+            rs = avg_gain / avg_loss.replace(0, np.nan)
+
+            df["rsi"] = 100 - (
+                100 / (1 + rs)
+            )
+
+            df["rsi"] = df["rsi"].fillna(50)
+
+            # ATR
+            previous_close = df["close"].shift(1)
+
+            tr1 = df["high"] - df["low"]
+            tr2 = (df["high"] - previous_close).abs()
+            tr3 = (df["low"] - previous_close).abs()
+
+            df["tr"] = pd.concat(
+                [tr1, tr2, tr3],
+                axis=1
+            ).max(axis=1)
+
+            df["atr"] = df["tr"].rolling(14).mean()
+
+            # Volume average
+            df["volume_ma"] = df["volume"].rolling(20).mean()
+
+            # --------------------------------------------------
+            # Current values
+            # --------------------------------------------------
+
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
+
+            close = self._safe_float(last["close"])
+            prev_close = self._safe_float(prev["close"])
+
+            ema9 = self._safe_float(last["ema9"])
+            ema21 = self._safe_float(last["ema21"])
+            ema50 = self._safe_float(last["ema50"])
+
+            rsi = self._safe_float(last["rsi"], 50)
+
+            atr = self._safe_float(last["atr"], 0)
+
+            volume = self._safe_float(last["volume"], 0)
+            volume_ma = self._safe_float(
+                last["volume_ma"],
+                0
+            )
+
+            # --------------------------------------------------
+            # Trend
+            # --------------------------------------------------
+
+            bullish_trend = (
+                close > ema21
+                and ema9 > ema21
+            )
+
+            bearish_trend = (
+                close < ema21
+                and ema9 < ema21
+            )
+
+            strong_bullish_trend = (
+                bullish_trend
+                and close > ema50
+                and ema21 > ema50
+            )
+
+            strong_bearish_trend = (
+                bearish_trend
+                and close < ema50
+                and ema21 < ema50
+            )
+
+            # --------------------------------------------------
+            # Momentum
+            # --------------------------------------------------
+
+            bullish_momentum = rsi >= 55 and rsi <= 72
+            bearish_momentum = rsi <= 45 and rsi >= 28
+
+            # --------------------------------------------------
+            # Volume confirmation
+            # --------------------------------------------------
+
+            volume_ratio = (
+                volume / volume_ma
+                if volume_ma > 0
+                else 1.0
+            )
+
+            volume_confirmed = volume_ratio >= 1.15
+
+            # --------------------------------------------------
+            # Price displacement
+            # --------------------------------------------------
+
+            price_move_pct = 0.0
+
+            if prev_close > 0:
+                price_move_pct = (
+                    (close - prev_close)
+                    / prev_close
+                ) * 100
+
+            # --------------------------------------------------
+            # Structure
+            # --------------------------------------------------
+
+            recent_high = df["high"].iloc[-11:-1].max()
+            recent_low = df["low"].iloc[-11:-1].min()
+
+            bullish_breakout = (
+                close > recent_high
+            )
+
+            bearish_breakdown = (
+                close < recent_low
+            )
+
+            # --------------------------------------------------
+            # Candle pressure
+            # --------------------------------------------------
+
+            candle_range = max(
+                self._safe_float(last["high"])
+                - self._safe_float(last["low"]),
+                0.0
+            )
+
+            candle_body = abs(
+                close
+                - self._safe_float(last["open"])
+            )
+
+            body_ratio = (
+                candle_body / candle_range
+                if candle_range > 0
+                else 0
+            )
+
+            bullish_candle = (
+                close > self._safe_float(last["open"])
+                and body_ratio >= 0.45
+            )
+
+            bearish_candle = (
+                close < self._safe_float(last["open"])
+                and body_ratio >= 0.45
+            )
+
+            # --------------------------------------------------
+            # Score
+            # --------------------------------------------------
+
+            buy_score = 0
+            sell_score = 0
+
+            buy_triggers = []
+            sell_triggers = []
+
+            # Trend
+            if bullish_trend:
+                buy_score += 18
+                buy_triggers.append("EMA Bullish")
+
+            if strong_bullish_trend:
+                buy_score += 10
+                buy_triggers.append("HTF Trend Alignment")
+
+            if bearish_trend:
+                sell_score += 18
+                sell_triggers.append("EMA Bearish")
+
+            if strong_bearish_trend:
+                sell_score += 10
+                sell_triggers.append("HTF Trend Alignment")
+
+            # Momentum
+            if bullish_momentum:
+                buy_score += 16
+                buy_triggers.append("RSI Momentum")
+
+            if bearish_momentum:
+                sell_score += 16
+                sell_triggers.append("RSI Momentum")
+
+            # Breakout
+            if bullish_breakout:
+                buy_score += 20
+                buy_triggers.append("Bullish Breakout")
+
+            if bearish_breakdown:
+                sell_score += 20
+                sell_triggers.append("Bearish Breakdown")
+
+            # Volume
+            if volume_confirmed:
+
+                if price_move_pct > 0:
+                    buy_score += 14
+                    buy_triggers.append("Volume Confirmation")
+
+                elif price_move_pct < 0:
+                    sell_score += 14
+                    sell_triggers.append("Volume Confirmation")
+
+            # Candle confirmation
+            if bullish_candle:
+                buy_score += 10
+                buy_triggers.append("Bullish Candle")
+
+            if bearish_candle:
+                sell_score += 10
+                sell_triggers.append("Bearish Candle")
+
+            # Small price displacement
+            if price_move_pct >= 0.20:
+                buy_score += 5
+                buy_triggers.append("Positive Price Expansion")
+
+            if price_move_pct <= -0.20:
+                sell_score += 5
+                sell_triggers.append("Negative Price Expansion")
+
+            # --------------------------------------------------
+            # Clamp scores
+            # --------------------------------------------------
+
+            buy_score = int(
+                max(0, min(100, buy_score))
+            )
+
+            sell_score = int(
+                max(0, min(100, sell_score))
+            )
+
+            # --------------------------------------------------
+            # Final direction
+            # --------------------------------------------------
+
+            if buy_score > sell_score:
+                action = "BUY"
+                score = buy_score
+                triggers = buy_triggers
+
+            elif sell_score > buy_score:
+                action = "SELL"
+                score = sell_score
+                triggers = sell_triggers
+
+            else:
+                action = "WAIT"
+                score = max(
+                    buy_score,
+                    sell_score
+                )
+                triggers = []
+
+            # --------------------------------------------------
+            # Confirmation
+            # --------------------------------------------------
+
+            structure_confirmed = (
+                bullish_breakout
+                or bearish_breakdown
+                or strong_bullish_trend
+                or strong_bearish_trend
+            )
+
+            momentum_confirmed = (
+                bullish_momentum
+                or bearish_momentum
+            )
+
+            # --------------------------------------------------
+            # Anti-whipsaw
+            #
+            # Do NOT force BUY/SELL when the evidence is weak.
+            # --------------------------------------------------
+
+            if score < self.minimum_score:
+
+                return {
+                    "coin": coin,
+                    "action": "WAIT",
+                    "score": score,
+                    "buy_score": buy_score,
+                    "sell_score": sell_score,
+                    "triggers": triggers,
+                    "signal": False,
+                    "structure_confirmed": structure_confirmed,
+                    "momentum_confirmed": momentum_confirmed,
+                    "volume_confirmed": volume_confirmed,
+                    "weak_adx": False,
+                    "pressure": "NEUTRAL",
+                    "rsi": round(rsi, 2),
+                    "volume_ratio": round(
+                        volume_ratio,
+                        2
+                    ),
+                    "price_move_pct": round(
+                        price_move_pct,
+                        3
+                    ),
+                    "atr": round(
+                        atr,
+                        8
+                    ),
+                    "reason": "score_below_minimum"
+                }
+
+            # --------------------------------------------------
+            # Strong signal requirement
+            # --------------------------------------------------
+
+            confirmation_count = sum(
+                [
+                    structure_confirmed,
+                    momentum_confirmed,
+                    volume_confirmed,
+                ]
+            )
+
+            if confirmation_count < 2:
+
+                return {
+                    "coin": coin,
+                    "action": "WAIT",
+                    "score": score,
+                    "buy_score": buy_score,
+                    "sell_score": sell_score,
+                    "triggers": triggers,
+                    "signal": False,
+                    "structure_confirmed": structure_confirmed,
+                    "momentum_confirmed": momentum_confirmed,
+                    "volume_confirmed": volume_confirmed,
+                    "weak_adx": False,
+                    "pressure": "NEUTRAL",
+                    "rsi": round(rsi, 2),
+                    "volume_ratio": round(
+                        volume_ratio,
+                        2
+                    ),
+                    "price_move_pct": round(
+                        price_move_pct,
+                        3
+                    ),
+                    "atr": round(
+                        atr,
+                        8
+                    ),
+                    "reason": "confirmation_failed"
+                }
+
+            # --------------------------------------------------
+            # Final strong signal
+            # --------------------------------------------------
+
+            pressure = (
+                "BULLISH"
+                if action == "BUY"
+                else "BEARISH"
+            )
+
+            return {
+                "coin": coin,
+                "action": action,
+                "score": score,
+                "buy_score": buy_score,
+                "sell_score": sell_score,
+                "triggers": triggers,
+                "signal": True,
+                "structure_confirmed": structure_confirmed,
+                "momentum_confirmed": momentum_confirmed,
+                "volume_confirmed": volume_confirmed,
+                "weak_adx": False,
+                "pressure": pressure,
+                "rsi": round(rsi, 2),
+                "volume_ratio": round(
+                    volume_ratio,
+                    2
+                ),
+                "price_move_pct": round(
+                    price_move_pct,
+                    3
+                ),
+                "atr": round(
+                    atr,
+                    8
+                ),
+                "reason": "technical_confirmation_passed"
+            }
+
+        except Exception as exc:
+
+            logger.exception(
+                "Technical engine error for %s: %s",
+                coin,
+                exc
+            )
+
+            return self._empty_result(
+                coin,
+                reason="technical_engine_error"
+            )
+
+    # ==========================================================
+    # DATA PREPARATION
+    # ==========================================================
+
+    def _prepare_dataframe(
+        self,
+        df: pd.DataFrame
+    ) -> Optional[pd.DataFrame]:
+
+        if df is None or df.empty:
+            return None
+
+        df = df.copy()
 
         # Normalize column names
         df.columns = [
-            str(col).strip().lower()
-            for col in df.columns
+            str(c).strip().lower()
+            for c in df.columns
         ]
 
         # Common aliases
@@ -248,566 +795,132 @@ class TechnicalEngine:
             "vol": "volume",
         }
 
-        df.rename(columns=aliases, inplace=True)
+        for old, new in aliases.items():
 
-        required = ["open", "high", "low", "close"]
+            if old in df.columns and new not in df.columns:
+                df[new] = df[old]
 
-        if not all(col in df.columns for col in required):
-            logger.warning(
-                f"Missing OHLC columns. Found: {list(df.columns)}"
-            )
-            return None
+        required = [
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+
+        for column in required:
+
+            if column not in df.columns:
+                logger.warning(
+                    "Missing OHLC column: %s",
+                    column
+                )
+                return None
 
         if "volume" not in df.columns:
             df["volume"] = 0.0
 
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(
-                df[col],
+        # Numeric conversion
+        for column in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]:
+
+            df[column] = pd.to_numeric(
+                df[column],
                 errors="coerce"
             )
 
-        df.replace(
-            [np.inf, -np.inf],
-            np.nan,
-            inplace=True
+        # Remove invalid rows
+        df = df.dropna(
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
         )
 
-        df.dropna(
-            subset=["open", "high", "low", "close"],
-            inplace=True
-        )
+        # Remove impossible prices
+        df = df[
+            (df["close"] > 0)
+            & (df["high"] > 0)
+            & (df["low"] > 0)
+        ]
 
         if df.empty:
             return None
 
-        # Keep chronological order when possible
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.sort_index()
+        # Sort by index/time if possible
+        if "timestamp" in df.columns:
 
-        return df.reset_index(drop=True)
-
-    # ============================================================
-    # SINGLE ASSET ANALYSIS
-    # ============================================================
-
-    def _analyze_single_asset(
-        self,
-        asset: str,
-        df: pd.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-
-        df = df.copy()
-
-        self._add_indicators(df)
-
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        close = float(last["close"])
-
-        if close <= 0:
-            return None
-
-        # --------------------------------------------------------
-        # TREND
-        # --------------------------------------------------------
-
-        ema_fast = float(last["ema_fast"])
-        ema_slow = float(last["ema_slow"])
-
-        trend_bullish = ema_fast > ema_slow
-        trend_bearish = ema_fast < ema_slow
-
-        # --------------------------------------------------------
-        # MOMENTUM
-        # --------------------------------------------------------
-
-        rsi = float(last["rsi"])
-
-        momentum_bullish = 52 <= rsi <= 72
-        momentum_bearish = 28 <= rsi <= 48
-
-        # --------------------------------------------------------
-        # MACD
-        # --------------------------------------------------------
-
-        macd = float(last["macd"])
-        macd_signal = float(last["macd_signal"])
-
-        macd_bullish = macd > macd_signal
-        macd_bearish = macd < macd_signal
-
-        # --------------------------------------------------------
-        # VOLUME
-        # --------------------------------------------------------
-
-        volume_ratio = float(last["volume_ratio"])
-
-        volume_confirmed = volume_ratio >= 1.10
-
-        # --------------------------------------------------------
-        # PRICE STRUCTURE
-        # --------------------------------------------------------
-
-        recent_high = float(
-            df["high"].iloc[-6:-1].max()
-        )
-
-        recent_low = float(
-            df["low"].iloc[-6:-1].min()
-        )
-
-        bullish_breakout = close > recent_high
-        bearish_breakdown = close < recent_low
-
-        # --------------------------------------------------------
-        # CANDLE
-        # --------------------------------------------------------
-
-        candle_range = max(
-            float(last["high"] - last["low"]),
-            0.00000001
-        )
-
-        body = abs(
-            float(last["close"] - last["open"])
-        )
-
-        body_ratio = body / candle_range
-
-        bullish_candle = (
-            last["close"] > last["open"]
-            and body_ratio >= 0.45
-        )
-
-        bearish_candle = (
-            last["close"] < last["open"]
-            and body_ratio >= 0.45
-        )
-
-        # --------------------------------------------------------
-        # PRICE CHANGE
-        # --------------------------------------------------------
-
-        prev_close = float(prev["close"])
-
-        price_change_pct = (
-            (close - prev_close)
-            / prev_close
-            * 100
-            if prev_close != 0
-            else 0
-        )
-
-        # --------------------------------------------------------
-        # ATR
-        # --------------------------------------------------------
-
-        atr = float(last["atr"])
-
-        if atr > 0:
-            atr_percent = (atr / close) * 100
-        else:
-            atr_percent = 0
-
-        # --------------------------------------------------------
-        # BUY SCORE
-        # --------------------------------------------------------
-
-        buy_score = 0
-        buy_triggers = []
-
-        if trend_bullish:
-            buy_score += 22
-            buy_triggers.append("EMA Trend Bullish")
-
-        if macd_bullish:
-            buy_score += 16
-            buy_triggers.append("MACD Bullish")
-
-        if momentum_bullish:
-            buy_score += 14
-            buy_triggers.append("RSI Momentum")
-
-        if volume_confirmed and trend_bullish:
-            buy_score += 14
-            buy_triggers.append("Volume Confirmation")
-
-        if bullish_breakout:
-            buy_score += 16
-            buy_triggers.append("Structure Breakout")
-
-        if bullish_candle:
-            buy_score += 8
-            buy_triggers.append("Bullish Candle")
-
-        if price_change_pct > 0:
-            buy_score += 5
-
-        # --------------------------------------------------------
-        # SELL SCORE
-        # --------------------------------------------------------
-
-        sell_score = 0
-        sell_triggers = []
-
-        if trend_bearish:
-            sell_score += 22
-            sell_triggers.append("EMA Trend Bearish")
-
-        if macd_bearish:
-            sell_score += 16
-            sell_triggers.append("MACD Bearish")
-
-        if momentum_bearish:
-            sell_score += 14
-            sell_triggers.append("RSI Momentum")
-
-        if volume_confirmed and trend_bearish:
-            sell_score += 14
-            sell_triggers.append("Volume Confirmation")
-
-        if bearish_breakdown:
-            sell_score += 16
-            sell_triggers.append("Structure Breakdown")
-
-        if bearish_candle:
-            sell_score += 8
-            sell_triggers.append("Bearish Candle")
-
-        if price_change_pct < 0:
-            sell_score += 5
-
-        # --------------------------------------------------------
-        # SELECT DIRECTION
-        # --------------------------------------------------------
-
-        if buy_score == 0 and sell_score == 0:
-            return {
-                "asset": asset,
-                "coin": asset,
-                "action": "WAIT",
-                "score": 0,
-                "triggers": [],
-                "rejection_reasons": [
-                    "no_directional_setup"
-                ],
-            }
-
-        if buy_score >= sell_score:
-            action = "BUY"
-            score = min(buy_score, 100)
-            triggers = buy_triggers
-            opposite_score = sell_score
-        else:
-            action = "SELL"
-            score = min(sell_score, 100)
-            triggers = sell_triggers
-            opposite_score = buy_score
-
-        # --------------------------------------------------------
-        # CONFIRMATION / REJECTION LOGIC
-        # --------------------------------------------------------
-
-        rejection_reasons = []
-
-        if score < self.minimum_score:
-            rejection_reasons.append("score_below_minimum")
-
-        # Prevent weak direction when opposite side is almost equal
-        if score > 0:
-            direction_gap = score - opposite_score
-
-            if direction_gap < 10:
-                rejection_reasons.append(
-                    "direction_not_clear"
+            try:
+                df = df.sort_values(
+                    "timestamp"
                 )
+            except Exception:
+                pass
 
-        # Avoid overbought BUY
-        if action == "BUY" and rsi >= 78:
-            rejection_reasons.append(
-                "rsi_overbought"
-            )
+        return df.reset_index(
+            drop=True
+        )
 
-        # Avoid oversold SELL
-        if action == "SELL" and rsi <= 22:
-            rejection_reasons.append(
-                "rsi_oversold"
-            )
+    # ==========================================================
+    # EMPTY / SAFE HELPERS
+    # ==========================================================
 
-        # Need at least 2 technical confirmations
-        if len(triggers) < 2:
-            rejection_reasons.append(
-                "insufficient_confirmation"
-            )
+    def _empty_result(
+        self,
+        coin: str,
+        reason: str
+    ) -> Dict[str, Any]:
 
-        # --------------------------------------------------------
-        # FINAL RESULT
-        # --------------------------------------------------------
-
-        result = {
-            "asset": asset,
-            "coin": asset,
-            "action": action,
-            "score": int(score),
-
-            "signal_type": (
-                "🟢 Strong Signal"
-                if score >= self.strong_score
-                else "🟡 Technical Signal"
-            ),
-
-            "triggers": triggers,
-
-            "price": round(close, 8),
-
-            "price_change_pct": round(
-                price_change_pct,
-                4
-            ),
-
-            "rsi": round(rsi, 2),
-
-            "macd": round(
-                macd,
-                8
-            ),
-
-            "macd_signal": round(
-                macd_signal,
-                8
-            ),
-
-            "volume_ratio": round(
-                volume_ratio,
-                2
-            ),
-
-            "atr": round(
-                atr,
-                8
-            ),
-
-            "atr_percent": round(
-                atr_percent,
-                4
-            ),
-
-            "ema_fast": round(
-                ema_fast,
-                8
-            ),
-
-            "ema_slow": round(
-                ema_slow,
-                8
-            ),
-
-            "rejection_reasons": rejection_reasons,
-
-            "reason": self._build_reason(
-                action,
-                score,
-                triggers,
-                rsi,
-                volume_ratio
-            ),
+        return {
+            "coin": coin,
+            "action": "WAIT",
+            "score": 0,
+            "buy_score": 0,
+            "sell_score": 0,
+            "triggers": [],
+            "signal": False,
+            "structure_confirmed": False,
+            "momentum_confirmed": False,
+            "volume_confirmed": False,
+            "weak_adx": False,
+            "pressure": "NEUTRAL",
+            "rsi": 50.0,
+            "volume_ratio": 0.0,
+            "price_move_pct": 0.0,
+            "atr": 0.0,
+            "reason": reason
         }
 
-        # If technically weak, don't return it as a candidate
-        if rejection_reasons:
-            logger.info(
-                f"REJECT {asset}: score={score} < "
-                f"{self.minimum_score} or confirmation failed "
-                f"| {rejection_reasons}"
-            )
-            return None
+    @staticmethod
+    def _safe_float(
+        value: Any,
+        default: float = 0.0
+    ) -> float:
 
-        return result
+        try:
 
-    # ============================================================
-    # INDICATORS
-    # ============================================================
+            if value is None:
+                return default
 
-    def _add_indicators(
-        self,
-        df: pd.DataFrame
-    ) -> None:
+            value = float(value)
 
-        # EMA
-        df["ema_fast"] = (
-            df["close"]
-            .ewm(span=9, adjust=False)
-            .mean()
-        )
+            if not np.isfinite(value):
+                return default
 
-        df["ema_slow"] = (
-            df["close"]
-            .ewm(span=21, adjust=False)
-            .mean()
-        )
+            return value
 
-        # RSI
-        delta = df["close"].diff()
-
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-
-        rs = avg_gain / avg_loss.replace(
-            0,
-            np.nan
-        )
-
-        df["rsi"] = (
-            100
-            - (100 / (1 + rs))
-        )
-
-        df["rsi"] = df["rsi"].fillna(50)
-
-        # MACD
-        ema12 = (
-            df["close"]
-            .ewm(span=12, adjust=False)
-            .mean()
-        )
-
-        ema26 = (
-            df["close"]
-            .ewm(span=26, adjust=False)
-            .mean()
-        )
-
-        df["macd"] = ema12 - ema26
-
-        df["macd_signal"] = (
-            df["macd"]
-            .ewm(span=9, adjust=False)
-            .mean()
-        )
-
-        # ATR
-        previous_close = df["close"].shift(1)
-
-        tr1 = (
-            df["high"]
-            - df["low"]
-        )
-
-        tr2 = (
-            df["high"]
-            - previous_close
-        ).abs()
-
-        tr3 = (
-            df["low"]
-            - previous_close
-        ).abs()
-
-        true_range = pd.concat(
-            [tr1, tr2, tr3],
-            axis=1
-        ).max(axis=1)
-
-        df["atr"] = (
-            true_range
-            .rolling(14)
-            .mean()
-        )
-
-        # Volume ratio
-        volume_mean = (
-            df["volume"]
-            .rolling(14)
-            .mean()
-        )
-
-        df["volume_ratio"] = (
-            df["volume"]
-            / volume_mean.replace(
-                0,
-                np.nan
-            )
-        )
-
-        df["volume_ratio"] = (
-            df["volume_ratio"]
-            .replace(
-                [np.inf, -np.inf],
-                np.nan
-            )
-            .fillna(1.0)
-        )
-
-        # Final cleanup
-        numeric_columns = [
-            "ema_fast",
-            "ema_slow",
-            "rsi",
-            "macd",
-            "macd_signal",
-            "atr",
-            "volume_ratio",
-        ]
-
-        for col in numeric_columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
-            )
-
-        df[numeric_columns] = (
-            df[numeric_columns]
-            .replace(
-                [np.inf, -np.inf],
-                np.nan
-            )
-            .ffill()
-            .bfill()
-        )
-
-    # ============================================================
-    # REASONING
-    # ============================================================
-
-    def _build_reason(
-        self,
-        action: str,
-        score: int,
-        triggers: List[str],
-        rsi: float,
-        volume_ratio: float,
-    ) -> str:
-
-        direction = (
-            "bullish"
-            if action == "BUY"
-            else "bearish"
-        )
-
-        trigger_text = ", ".join(
-            triggers[:5]
-        )
-
-        return (
-            f"{direction.capitalize()} technical structure "
-            f"with score {score}/100. "
-            f"Confirmations: {trigger_text}. "
-            f"RSI={rsi:.1f}, "
-            f"VolumeRatio={volume_ratio:.2f}."
-        )
+        except Exception:
+            return default
 
 
-# ================================================================
-# SAFE FACTORY
-# ================================================================
+# ==========================================================
+# COMPATIBILITY ALIAS
+# ==========================================================
 
-def create_technical_engine() -> TechnicalEngine:
-    return TechnicalEngine(
-        minimum_score=70,
-        strong_score=85
-    )
+TechnicalEngineV2 = TechnicalEngine
